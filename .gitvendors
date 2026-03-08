@@ -1,0 +1,6 @@
+[vendor "git-vendor"]
+	url = https://github.com/git-ents/git-vendor.git
+	branch = main
+	base = 52b0f42ed9b374bf2b248a130d4b43e22a94e1c0
+	pattern = .github/
+	pattern = .config/
