@@ -3,8 +3,8 @@ mod exe;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
-use git_metadata::{MetadataIndex, MetadataOptions};
-use git2::Oid;
+use git_metadata::MetadataOptions;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process;
 
@@ -29,7 +29,7 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let repo = open_repo(cli.repo.as_deref())?;
-    let ref_name = &cli.ref_name;
+    let ref_name = &cli.r#ref;
 
     match &cli.command {
         Command::List => {
@@ -43,49 +43,134 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Get { target } => {
-            let target_oid = parse_oid(target)?;
-            match exe::get(&repo, ref_name, &target_oid)? {
-                Some(tree_oid) => println!("{}", tree_oid),
-                None => {
-                    eprintln!("No metadata entry for {}.", target);
-                    process::exit(1);
+        Command::Show { object } => {
+            let target = exe::resolve_oid(&repo, object)?;
+            let entries = exe::show(&repo, ref_name, &target)?;
+            if entries.is_empty() {
+                eprintln!("No metadata for {}.", target);
+                process::exit(1);
+            }
+            for entry in &entries {
+                match entry.content.as_deref() {
+                    Some(content) if !content.is_empty() => {
+                        let text = String::from_utf8_lossy(content);
+                        println!("{}\t{}", entry.path, text);
+                    }
+                    _ => {
+                        println!("{}", entry.path);
+                    }
                 }
             }
         }
 
-        Command::Set {
-            target,
-            tree,
+        Command::Add {
+            path,
+            object,
+            message,
+            file,
             force,
+            allow_empty,
             shard_level,
         } => {
-            let target_oid = parse_oid(target)?;
-            let tree_oid = parse_oid(tree)?;
+            let target = exe::resolve_oid(&repo, object)?;
+
+            let content = if let Some(msg) = message {
+                Some(msg.as_bytes().to_vec())
+            } else if let Some(filepath) = file {
+                Some(std::fs::read(filepath)?)
+            } else {
+                // Read from stdin if it's not a TTY.
+                if atty_stdin() {
+                    None
+                } else {
+                    let mut buf = Vec::new();
+                    std::io::stdin().read_to_end(&mut buf)?;
+                    Some(buf)
+                }
+            };
+
+            if !allow_empty {
+                if let Some(ref c) = content {
+                    if c.is_empty() {
+                        return Err("refusing to add empty content (use --allow-empty)".into());
+                    }
+                }
+            }
+
             let opts = MetadataOptions {
                 shard_level: *shard_level,
                 force: *force,
             };
-            let root = exe::set(&repo, ref_name, &target_oid, &tree_oid, &opts)?;
-            eprintln!("Set {} -> {} (root tree {}).", target, tree, root);
+
+            let tree_oid = exe::add(&repo, ref_name, &target, path, content.as_deref(), &opts)?;
+            eprintln!("Added {} to {} (tree {}).", path, target, tree_oid);
         }
 
-        Command::Remove { target } => {
-            let target_oid = parse_oid(target)?;
-            if exe::remove(&repo, ref_name, &target_oid)? {
-                eprintln!("Removed metadata entry for {}.", target);
+        Command::Remove {
+            patterns,
+            object,
+            keep,
+        } => {
+            let target = exe::resolve_oid(&repo, object)?;
+
+            if patterns.is_empty() {
+                return Err("at least one pattern is required".into());
+            }
+
+            let pat_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+            if exe::remove_paths(&repo, ref_name, &target, &pat_refs, *keep)? {
+                eprintln!("Removed matching entries from {}.", target);
             } else {
-                eprintln!("No metadata entry for {}.", target);
+                eprintln!("No matching entries for {}.", target);
                 process::exit(1);
             }
+        }
+
+        Command::Copy {
+            from,
+            to,
+            force,
+            shard_level,
+        } => {
+            let from_oid = exe::resolve_oid(&repo, from)?;
+            let to_oid = exe::resolve_oid(&repo, to)?;
+            let opts = MetadataOptions {
+                shard_level: *shard_level,
+                force: *force,
+            };
+            let tree_oid = exe::copy(&repo, ref_name, &from_oid, &to_oid, &opts)?;
+            eprintln!("Copied {} -> {} (tree {}).", from_oid, to_oid, tree_oid);
+        }
+
+        Command::Prune { dry_run, verbose } => {
+            let pruned = exe::prune(&repo, ref_name, *dry_run)?;
+            if pruned.is_empty() {
+                eprintln!("Nothing to prune.");
+            } else {
+                for oid in &pruned {
+                    if *verbose || *dry_run {
+                        println!("{}", oid);
+                    }
+                }
+                if *dry_run {
+                    eprintln!("{} entries would be pruned.", pruned.len());
+                } else {
+                    eprintln!("Pruned {} entries.", pruned.len());
+                }
+            }
+        }
+
+        Command::GetRef => {
+            println!("{}", exe::get_ref(&repo, ref_name));
         }
     }
 
     Ok(())
 }
 
-fn parse_oid(s: &str) -> Result<Oid, Box<dyn std::error::Error>> {
-    Oid::from_str(s).map_err(|e| format!("invalid OID '{}': {}", s, e).into())
+/// Check if stdin is a terminal (no piped input).
+fn atty_stdin() -> bool {
+    std::io::stdin().is_terminal()
 }
 
 /// Check for `--generate-man <DIR>` before clap parses, so it doesn't

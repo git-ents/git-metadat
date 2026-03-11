@@ -15,9 +15,9 @@ pub struct Cli {
     #[arg(short = 'C', long, global = true)]
     pub repo: Option<PathBuf>,
 
-    /// The ref under which metadata is stored (e.g. `refs/metadata/commits`).
-    #[arg(short, long, global = true, default_value = "refs/metadata/commits")]
-    pub ref_name: String,
+    /// The ref under which metadata is stored.
+    #[arg(long, global = true, default_value = "refs/metadata/commits")]
+    pub r#ref: String,
 
     #[command(subcommand)]
     pub command: Command,
@@ -25,36 +25,88 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// List all entries in the metadata index.
+    /// List all targets that have metadata.
     List,
 
-    /// Read the metadata tree OID attached to a target object.
-    Get {
-        /// The OID of the target object to look up.
-        target: String,
+    /// Show the metadata tree entries for an object.
+    Show {
+        /// The target object (OID or revision). Defaults to HEAD.
+        #[arg(default_value = "HEAD")]
+        object: String,
     },
 
-    /// Write or overwrite the metadata tree for a target object.
-    Set {
-        /// The OID of the target object.
-        target: String,
+    /// Add a path entry to an object's metadata tree.
+    Add {
+        /// The path to add (e.g. `labels/bug`, `review/status`).
+        path: String,
 
-        /// The OID of the tree to associate with the target.
-        tree: String,
+        /// The target object (OID or revision). Defaults to HEAD.
+        #[arg(default_value = "HEAD")]
+        object: String,
 
-        /// Overwrite an existing entry without error.
+        /// Content to store in the blob. Reads from stdin when omitted.
+        #[arg(short, long)]
+        message: Option<String>,
+
+        /// Read content from a file.
+        #[arg(short = 'F', long, conflicts_with = "message")]
+        file: Option<PathBuf>,
+
+        /// Overwrite an existing path without error.
         #[arg(short, long)]
         force: bool,
 
-        /// Fanout depth: number of 2-hex-char directory segments.
-        /// 1 means `ab/cdef01...` (like git-notes). 2 means `ab/cd/ef01...`.
+        /// Allow adding an entry with empty content.
+        #[arg(long)]
+        allow_empty: bool,
+
+        /// Fanout depth (number of 2-hex-char directory segments).
         #[arg(long, default_value_t = 1)]
         shard_level: u8,
     },
 
-    /// Remove the metadata entry for a target object.
+    /// Remove path entries from an object's metadata tree.
     Remove {
-        /// The OID of the target object to remove.
-        target: String,
+        /// Glob patterns for entries to remove (or keep with `--keep`).
+        patterns: Vec<String>,
+
+        /// The target object (OID or revision). Defaults to HEAD.
+        #[arg(short, long, default_value = "HEAD")]
+        object: String,
+
+        /// Invert: keep only entries matching the patterns.
+        #[arg(long)]
+        keep: bool,
     },
+
+    /// Copy metadata from one object to another.
+    Copy {
+        /// The source object (OID or revision).
+        from: String,
+
+        /// The destination object (OID or revision).
+        to: String,
+
+        /// Overwrite existing metadata on the destination.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Fanout depth (number of 2-hex-char directory segments).
+        #[arg(long, default_value_t = 1)]
+        shard_level: u8,
+    },
+
+    /// Remove metadata for objects that no longer exist.
+    Prune {
+        /// Only report what would be pruned; do not actually remove.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
+        /// Print each pruned object.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
+    /// Print the metadata ref name.
+    GetRef,
 }

@@ -35,11 +35,49 @@ Just like notes, metadata added to an object does not alter the object's history
 
 ## Usage
 
-Given any blob (file), tree (folder), or commit, add metadata using `metadata add`.
-By default, `add` assumes you're adding metadata to `HEAD`.
-Alternatively, use the `--oid` option to specify a Git object identifier.
-To remove metadata for a particular object, use `metadata remove` and provide glob patterns which represent entries in the metadata tree to be deleted.
-Use the `--keep` option to instead specify patterns to keep.
+Metadata entries are paths (with optional blob content) stored in a Git tree object, associated with any target object (blob, tree, or commit) via a fanout ref.
+The command follows `git notes` semantics: `list`, `show`, `add`, `remove`, `copy`, `prune`, and `get-ref`.
+
+<!-- rumdl-disable MD013 -->
+
+```shell
+# Add a path entry to HEAD's metadata tree
+git metadata add labels/bug
+git metadata add review/status -m approved
+
+# Add metadata to a specific object
+git metadata add labels/urgent abc1234
+
+# Show all metadata entries for an object
+git metadata show          # defaults to HEAD
+git metadata show abc1234
+
+# List all targets that have metadata
+git metadata list
+
+# Remove entries by glob pattern
+git metadata remove 'labels/*'
+git metadata remove 'labels/bug' -o abc1234
+
+# Keep only matching entries (remove everything else)
+git metadata remove --keep 'review/**'
+
+# Copy metadata from one object to another
+git metadata copy abc1234 def5678
+
+# Remove metadata for objects that no longer exist
+git metadata prune
+git metadata prune -n  # dry run
+
+# Print the metadata ref name
+git metadata get-ref
+
+# Use a custom ref
+git metadata --ref refs/metadata/custom add labels/bug
+```
+
+<!-- rumdl-enable MD013 -->
+
 For more information, see `git metadata --help`.
 
 ## Installation
