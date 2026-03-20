@@ -2,12 +2,6 @@
 
 ## [0.2.1](https://github.com/git-ents/git-data/compare/git-metadata-v0.2.0...git-metadata-v0.2.1) (2026-03-20)
 
-
-### Bug Fixes
-
-* Move project to new repository ([4697dfa](https://github.com/git-ents/git-data/commit/4697dfa55a70721ec63c87da208e31a1fbbfe061))
-
-
 ### Miscellaneous Chores
 
 * Move project to new repository ([d961a8c](https://github.com/git-ents/git-data/commit/d961a8cc0cf8459b790b4d614bd27c0e4d24cd15))
