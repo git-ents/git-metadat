@@ -92,9 +92,11 @@ If the counter is lost or stale, a rescan rebuilds it.
 
 **Operations:**
 
-- `create(namespace, fields)` — scan for the next available ID, create a new ref with an initial commit containing the given tree. Retry on conflict.
+- `create(namespace, fields)` — scan for the next available ID, create a new ref with an initial commit containing the given tree.
+  Retry on conflict.
 - `read(namespace, id)` — read the current tree at a record's ref.
-- `update(namespace, id, mutations)` — commit a new tree to the record's ref. The previous state is preserved in history.
+- `update(namespace, id, mutations)` — commit a new tree to the record's ref.
+  The previous state is preserved in history.
 - `list(namespace)` — prefix scan over `refs/<namespace>/` to enumerate records.
 - `history(namespace, id)` — walk the commit chain on a record's ref.
 
