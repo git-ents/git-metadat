@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/git-ents/git-data/compare/git-metadata-v0.2.0...git-metadata-v0.2.1) (2026-03-20)
+
+### Miscellaneous Chores
+
+* Move project to new repository ([d961a8c](https://github.com/git-ents/git-data/commit/d961a8cc0cf8459b790b4d614bd27c0e4d24cd15))
+* Pin release ([5c1728a](https://github.com/git-ents/git-data/commit/5c1728a684724ed6507b9f9f06bf563f21db796e))
+
 ## 0.1.0 (2026-03-11)
 
 ### ⚠ BREAKING CHANGES
