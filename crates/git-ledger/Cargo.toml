@@ -1,0 +1,22 @@
+[package]
+name = "git-ledger"
+version = "0.1.0"
+edition = "2024"
+publish = true
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+description = "Git-native record storage: each record is a ref with typed fields."
+repository = "https://github.com/git-ents/git-data"
+homepage = "https://github.com/git-ents/git-data"
+documentation = "https://docs.rs/git-ledger"
+
+[[bin]]
+name = "git-ledger"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+git2 = "0.20.4"
+
+[dev-dependencies]
+tempfile = "3"
