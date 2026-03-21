@@ -89,13 +89,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            if !allow_empty {
-                if let Some(ref c) = content {
-                    if c.is_empty() {
+            if !allow_empty
+                && let Some(ref c) = content
+                    && c.is_empty() {
                         return Err("refusing to add empty content (use --allow-empty)".into());
                     }
-                }
-            }
 
             let opts = MetadataOptions {
                 shard_level: *shard_level,

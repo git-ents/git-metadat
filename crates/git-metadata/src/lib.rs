@@ -250,11 +250,10 @@ fn collect_entries(
         if is_fanout_segment(name) {
             let subtree = repo.find_tree(entry.id())?;
             results.extend(collect_entries(repo, &subtree, &full)?);
-        } else if let Ok(oid) = Oid::from_str(&full) {
-            if oid.to_string() == full {
+        } else if let Ok(oid) = Oid::from_str(&full)
+            && oid.to_string() == full {
                 results.push((oid, entry.id()));
             }
-        }
     }
     Ok(results)
 }
@@ -274,13 +273,11 @@ fn detect_fanout(
             .collect();
         let leaf = &hex[prefix_len..];
 
-        if let Some(subtree) = walk_tree(repo, root, &segments)? {
-            if let Some(entry) = subtree.get_name(leaf) {
-                if entry.kind() == Some(git2::ObjectType::Tree) {
+        if let Some(subtree) = walk_tree(repo, root, &segments)?
+            && let Some(entry) = subtree.get_name(leaf)
+                && entry.kind() == Some(git2::ObjectType::Tree) {
                     return Ok(Some((segments, leaf.to_string(), entry.id())));
                 }
-            }
-        }
     }
     Ok(None)
 }
@@ -362,7 +359,7 @@ fn build_fanout_remove(
     }
     builder.remove(leaf)?;
 
-    let mut child_oid = if builder.len() == 0 {
+    let mut child_oid = if builder.is_empty() {
         None
     } else {
         Some(builder.write()?)
@@ -379,7 +376,7 @@ fn build_fanout_remove(
                 builder.remove(seg)?;
             }
         }
-        child_oid = if builder.len() == 0 {
+        child_oid = if builder.is_empty() {
             None
         } else {
             Some(builder.write()?)
@@ -526,7 +523,7 @@ fn remove_path_recursive(
             return Err(Error::from_str("path not found"));
         }
         builder.remove(name)?;
-        if builder.len() == 0 {
+        if builder.is_empty() {
             Ok(None)
         } else {
             Ok(Some(builder.write()?))
@@ -548,7 +545,7 @@ fn remove_path_recursive(
                 builder.remove(name)?;
             }
         }
-        if builder.len() == 0 {
+        if builder.is_empty() {
             Ok(None)
         } else {
             Ok(Some(builder.write()?))
@@ -670,15 +667,13 @@ impl MetadataIndex for Repository {
         let (segments, leaf) = shard_oid(target, opts.shard_level);
         let existing_root = resolve_root_tree(self, ref_name)?;
 
-        if !opts.force {
-            if let Some(ref root) = existing_root {
-                if detect_fanout(self, root, target)?.is_some() {
+        if !opts.force
+            && let Some(ref root) = existing_root
+                && detect_fanout(self, root, target)?.is_some() {
                     return Err(Error::from_str(
                         "metadata entry already exists (use force to overwrite)",
                     ));
                 }
-            }
-        }
 
         build_fanout(self, existing_root.as_ref(), &segments, &leaf, tree)
     }
@@ -724,15 +719,13 @@ impl MetadataIndex for Repository {
         };
 
         // Check if path already exists.
-        if !opts.force {
-            if let Some(ref meta_tree) = existing_meta_tree {
-                if path_exists_in_tree(self, meta_tree, path) {
+        if !opts.force
+            && let Some(ref meta_tree) = existing_meta_tree
+                && path_exists_in_tree(self, meta_tree, path) {
                     return Err(Error::from_str(
                         "path already exists in metadata (use --force to overwrite)",
                     ));
                 }
-            }
-        }
 
         // Build new metadata tree with the path inserted.
         let new_meta_tree_oid =
@@ -869,13 +862,12 @@ impl MetadataIndex for Repository {
             }
         };
 
-        if !opts.force {
-            if detect_fanout(self, &root, to)?.is_some() {
+        if !opts.force
+            && detect_fanout(self, &root, to)?.is_some() {
                 return Err(Error::from_str(
                     "metadata entry already exists for target (use --force to overwrite)",
                 ));
             }
-        }
 
         let (segments, leaf) = shard_oid(to, opts.shard_level);
         let new_root = build_fanout(self, Some(&root), &segments, &leaf, &source_tree_oid)?;
@@ -995,8 +987,8 @@ impl MetadataIndex for Repository {
 
         if let Some(rel) = relation {
             // Only look at one relation
-            if let Some(rel_entry) = key_tree.get_name(rel) {
-                if rel_entry.kind() == Some(git2::ObjectType::Tree) {
+            if let Some(rel_entry) = key_tree.get_name(rel)
+                && rel_entry.kind() == Some(git2::ObjectType::Tree) {
                     let rel_tree = self.find_tree(rel_entry.id())?;
                     for target_entry in rel_tree.iter() {
                         if let Some(name) = target_entry.name() {
@@ -1004,7 +996,6 @@ impl MetadataIndex for Repository {
                         }
                     }
                 }
-            }
         } else {
             // All relations
             for rel_entry in key_tree.iter() {
