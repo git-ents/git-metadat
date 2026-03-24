@@ -33,9 +33,13 @@ pub enum Command {
         #[arg(long)]
         content_hash: bool,
 
-        /// Set a field (repeatable). Format: key=value
-        #[arg(long = "set", value_name = "KEY=VALUE")]
+        /// Set a field (repeatable). Format: key[=value]
+        #[arg(long = "set", value_name = "KEY[=VALUE]")]
         fields: Vec<String>,
+
+        /// Add a file to the record (repeatable). Format: [key=]path
+        #[arg(long = "file", value_name = "[KEY=]PATH")]
+        files: Vec<String>,
 
         /// Commit message.
         #[arg(short, long, default_value = "ledger: create")]
@@ -55,9 +59,13 @@ pub enum Command {
         #[arg(name = "ref")]
         ref_name: String,
 
-        /// Set a field (repeatable). Format: key=value
-        #[arg(long = "set", value_name = "KEY=VALUE")]
+        /// Set a field (repeatable). Format: key[=value]
+        #[arg(long = "set", value_name = "KEY[=VALUE]")]
         fields: Vec<String>,
+
+        /// Add a file to the record (repeatable). Format: [key=]path
+        #[arg(long = "file", value_name = "[KEY=]PATH")]
+        files: Vec<String>,
 
         /// Delete a field (repeatable).
         #[arg(long = "delete", value_name = "KEY")]
