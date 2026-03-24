@@ -9,19 +9,19 @@ Each commit's tree holds only that entry's payload — there is no accumulated s
 ### Append an event
 
 ```sh
-git chain append refs/events/log -m "build started"
+git chain append refs/comments/blob/a1b2c3d -m "this needs a bounds check"
 ```
 
 With a payload file:
 
 ```sh
-git chain append refs/events/log -m "test results" --payload results.json
+git chain append refs/comments/blob/a1b2c3d -m "suggested fix" --payload suggestion.diff
 ```
 
 With multiple payload files:
 
 ```sh
-git chain append refs/events/log -m "artifacts" --payload report.json --payload coverage.xml
+git chain append refs/comments/blob/a1b2c3d -m "context for the review" --payload suggestion.diff --payload trace.log
 ```
 
 ### Walk a chain
@@ -29,7 +29,7 @@ git chain append refs/events/log -m "artifacts" --payload report.json --payload 
 Walk from tip to root (most recent first):
 
 ```sh
-git chain walk refs/events/log
+git chain walk refs/comments/blob/a1b2c3d
 ```
 
 ### Threading
@@ -37,19 +37,19 @@ git chain walk refs/events/log
 Append a reply to a specific event (second parent creates a thread):
 
 ```sh
-git chain append refs/events/log -m "follow-up" --parent <commit>
+git chain append refs/comments/blob/a1b2c3d -m "good catch, fixed" --parent <commit>
 ```
 
 Walk only the commits in a specific thread:
 
 ```sh
-git chain walk refs/events/log --thread <commit>
+git chain walk refs/comments/blob/a1b2c3d --thread <commit>
 ```
 
 ### Use a different repository
 
 ```sh
-git chain -C /path/to/repo append refs/events/log -m "event"
+git chain -C /path/to/repo append refs/comments/blob/a1b2c3d -m "needs review"
 ```
 
 ## Design
