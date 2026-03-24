@@ -254,3 +254,79 @@ fn history_tracks_updates() {
     let history = repo.history(&created.ref_).unwrap();
     assert_eq!(history.len(), 3);
 }
+
+#[test]
+fn create_with_nested_fields() {
+    let (_dir, repo) = init_repo();
+
+    let entry = repo
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[("meta/priority", b"high"), ("title", b"hello")],
+            "create",
+        )
+        .unwrap();
+
+    // Fields should be read back from the tree, matching what read() returns
+    let read_entry = repo.read(&entry.ref_).unwrap();
+    assert_eq!(entry.fields, read_entry.fields);
+}
+
+#[test]
+fn delete_nested_field() {
+    let (_dir, repo) = init_repo();
+
+    let created = repo
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[("meta/priority", b"high"), ("title", b"hello")],
+            "create",
+        )
+        .unwrap();
+
+    let updated = repo
+        .update(
+            &created.ref_,
+            &[Mutation::Delete("meta/priority")],
+            "remove nested",
+        )
+        .unwrap();
+
+    // The nested field should be gone
+    assert!(
+        updated
+            .fields
+            .iter()
+            .find(|(k, _)| k == "meta/priority")
+            .is_none()
+    );
+    // The non-nested field should remain
+    assert!(updated.fields.iter().find(|(k, _)| k == "title").is_some());
+}
+
+#[test]
+fn delete_nested_field_removes_empty_parent() {
+    let (_dir, repo) = init_repo();
+
+    let created = repo
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[("meta/priority", b"high")],
+            "create",
+        )
+        .unwrap();
+
+    let updated = repo
+        .update(
+            &created.ref_,
+            &[Mutation::Delete("meta/priority")],
+            "remove nested",
+        )
+        .unwrap();
+
+    // Both the nested field and its now-empty parent should be gone
+    assert!(updated.fields.is_empty());
+}

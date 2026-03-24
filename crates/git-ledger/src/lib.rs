@@ -212,14 +212,14 @@ impl Ledger for Repository {
             &[], // no parents for first commit
         )?;
 
+        let fields = read_fields(self, &tree, "")?;
+        let id = ref_name.rsplit('/').next().unwrap_or(&ref_name).to_string();
+
         Ok(LedgerEntry {
             id,
             ref_: ref_name,
             commit: commit_oid,
-            fields: fields
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_vec()))
-                .collect(),
+            fields,
         })
     }
 
@@ -275,8 +275,27 @@ impl Ledger for Repository {
                     }
                 }
                 Mutation::Delete(name) => {
-                    // Ignore error if the field doesn't exist
-                    let _ = builder.remove(name);
+                    if name.contains('/') {
+                        let parts: Vec<&str> = name.splitn(2, '/').collect();
+                        let existing_tree_id = builder
+                            .get(parts[0])?
+                            .filter(|e| e.kind() == Some(git2::ObjectType::Tree))
+                            .map(|e| e.id());
+                        if let Some(tree_id) = existing_tree_id {
+                            let et = self.find_tree(tree_id)?;
+                            let mut sub_builder = self.treebuilder(Some(&et))?;
+                            let _ = sub_builder.remove(parts[1]);
+                            if sub_builder.is_empty() {
+                                let _ = builder.remove(parts[0]);
+                            } else {
+                                let sub_tree = sub_builder.write()?;
+                                builder.insert(parts[0], sub_tree, 0o040000)?;
+                            }
+                        }
+                    } else {
+                        // Ignore error if the field doesn't exist
+                        let _ = builder.remove(name);
+                    }
                 }
             }
         }

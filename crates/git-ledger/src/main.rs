@@ -50,10 +50,12 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
 
+            let stdin_buf;
             let strategy = if *content_hash {
                 let mut buf = Vec::new();
                 std::io::stdin().read_to_end(&mut buf)?;
-                IdStrategy::ContentAddressed(Box::leak(buf.into_boxed_slice()))
+                stdin_buf = buf;
+                IdStrategy::ContentAddressed(&stdin_buf)
             } else if let Some(id) = id {
                 IdStrategy::CallerProvided(id)
             } else {
@@ -96,6 +98,13 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             let ids = repo.list(ref_prefix)?;
             for id in &ids {
                 println!("{}", id);
+            }
+        }
+
+        Command::Log { ref_name } => {
+            let oids = repo.history(ref_name)?;
+            for oid in &oids {
+                println!("{}", oid);
             }
         }
     }
