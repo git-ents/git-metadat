@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.1](https://github.com/git-ents/git-data/compare/git-metadata-v0.2.1...git-metadata-v0.2.1) (2026-03-24)
+
+
+### Features
+
+* Add git-chain ([2a2cfea](https://github.com/git-ents/git-data/commit/2a2cfeaa9a78ee3d4a764008c14c9acb90672594))
+* Add git-ledger ([2a2cfea](https://github.com/git-ents/git-data/commit/2a2cfeaa9a78ee3d4a764008c14c9acb90672594))
+* Implement relation operations in git-metadata ([7725be8](https://github.com/git-ents/git-data/commit/7725be82c332da618ab0bfc6d6d39d9f46ee064b))
+
+
+### Bug Fixes
+
+* Handle slash in link keys and batch prune commits in git-metadata ([a37fb3e](https://github.com/git-ents/git-data/commit/a37fb3eb1430d869e77be663681f8223876c004d))
+
 ## [0.2.1](https://github.com/git-ents/git-data/compare/git-metadata-v0.2.0...git-metadata-v0.2.1) (2026-03-20)
 
 ### Miscellaneous Chores
