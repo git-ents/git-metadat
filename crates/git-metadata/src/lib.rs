@@ -183,8 +183,20 @@ pub trait MetadataIndex {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed shard level. A SHA-1 hex string is 40 chars; each level
+/// consumes 2 chars, so the leaf must keep at least 2 chars.
+const MAX_SHARD_LEVEL: u8 = 19;
+
 /// Split a hex OID string into `(prefix_segments, leaf)` according to `shard_level`.
-fn shard_oid(oid: &Oid, shard_level: u8) -> (Vec<String>, String) {
+///
+/// Returns an error if `shard_level` exceeds [`MAX_SHARD_LEVEL`].
+fn shard_oid(oid: &Oid, shard_level: u8) -> Result<(Vec<String>, String), Error> {
+    if shard_level > MAX_SHARD_LEVEL {
+        return Err(Error::from_str(&format!(
+            "shard_level {} exceeds maximum of {}",
+            shard_level, MAX_SHARD_LEVEL
+        )));
+    }
     let hex = oid.to_string();
     let mut segments = Vec::with_capacity(shard_level as usize);
     let mut pos = 0;
@@ -193,7 +205,7 @@ fn shard_oid(oid: &Oid, shard_level: u8) -> (Vec<String>, String) {
         pos += 2;
     }
     let leaf = hex[pos..].to_string();
-    (segments, leaf)
+    Ok((segments, leaf))
 }
 
 /// Resolve an existing root tree from a reference, if it exists.
@@ -251,9 +263,10 @@ fn collect_entries(
             let subtree = repo.find_tree(entry.id())?;
             results.extend(collect_entries(repo, &subtree, &full)?);
         } else if let Ok(oid) = Oid::from_str(&full)
-            && oid.to_string() == full {
-                results.push((oid, entry.id()));
-            }
+            && oid.to_string() == full
+        {
+            results.push((oid, entry.id()));
+        }
     }
     Ok(results)
 }
@@ -275,9 +288,10 @@ fn detect_fanout(
 
         if let Some(subtree) = walk_tree(repo, root, &segments)?
             && let Some(entry) = subtree.get_name(leaf)
-                && entry.kind() == Some(git2::ObjectType::Tree) {
-                    return Ok(Some((segments, leaf.to_string(), entry.id())));
-                }
+            && entry.kind() == Some(git2::ObjectType::Tree)
+        {
+            return Ok(Some((segments, leaf.to_string(), entry.id())));
+        }
     }
     Ok(None)
 }
@@ -634,6 +648,34 @@ fn glob_match_recursive(pattern: &[&str], path: &[&str]) -> bool {
     }
 }
 
+/// Recursively collect leaf paths (blobs) from a tree, building up the
+/// `/`-separated path as we descend.  Calls `cb` for each leaf found.
+fn collect_leaf_paths(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    prefix: &str,
+    cb: &mut dyn FnMut(String),
+) -> Result<(), Error> {
+    for entry in tree.iter() {
+        let name = match entry.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let full = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        if entry.kind() == Some(git2::ObjectType::Tree) {
+            let subtree = repo.find_tree(entry.id())?;
+            collect_leaf_paths(repo, &subtree, &full, cb)?;
+        } else {
+            cb(full);
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Implementation for git2::Repository
 // ---------------------------------------------------------------------------
@@ -664,16 +706,17 @@ impl MetadataIndex for Repository {
     ) -> Result<Oid, Error> {
         self.find_tree(*tree)?;
 
-        let (segments, leaf) = shard_oid(target, opts.shard_level);
+        let (segments, leaf) = shard_oid(target, opts.shard_level)?;
         let existing_root = resolve_root_tree(self, ref_name)?;
 
         if !opts.force
             && let Some(ref root) = existing_root
-                && detect_fanout(self, root, target)?.is_some() {
-                    return Err(Error::from_str(
-                        "metadata entry already exists (use force to overwrite)",
-                    ));
-                }
+            && detect_fanout(self, root, target)?.is_some()
+        {
+            return Err(Error::from_str(
+                "metadata entry already exists (use force to overwrite)",
+            ));
+        }
 
         build_fanout(self, existing_root.as_ref(), &segments, &leaf, tree)
     }
@@ -721,11 +764,12 @@ impl MetadataIndex for Repository {
         // Check if path already exists.
         if !opts.force
             && let Some(ref meta_tree) = existing_meta_tree
-                && path_exists_in_tree(self, meta_tree, path) {
-                    return Err(Error::from_str(
-                        "path already exists in metadata (use --force to overwrite)",
-                    ));
-                }
+            && path_exists_in_tree(self, meta_tree, path)
+        {
+            return Err(Error::from_str(
+                "path already exists in metadata (use --force to overwrite)",
+            ));
+        }
 
         // Build new metadata tree with the path inserted.
         let new_meta_tree_oid =
@@ -737,12 +781,12 @@ impl MetadataIndex for Repository {
             match &existing_root {
                 Some(root) => match detect_fanout(self, root, target)? {
                     Some((s, l, _)) => (s, l),
-                    None => shard_oid(target, opts.shard_level),
+                    None => shard_oid(target, opts.shard_level)?,
                 },
-                None => shard_oid(target, opts.shard_level),
+                None => shard_oid(target, opts.shard_level)?,
             }
         } else {
-            shard_oid(target, opts.shard_level)
+            shard_oid(target, opts.shard_level)?
         };
 
         let new_root = build_fanout(
@@ -862,14 +906,13 @@ impl MetadataIndex for Repository {
             }
         };
 
-        if !opts.force
-            && detect_fanout(self, &root, to)?.is_some() {
-                return Err(Error::from_str(
-                    "metadata entry already exists for target (use --force to overwrite)",
-                ));
-            }
+        if !opts.force && detect_fanout(self, &root, to)?.is_some() {
+            return Err(Error::from_str(
+                "metadata entry already exists for target (use --force to overwrite)",
+            ));
+        }
 
-        let (segments, leaf) = shard_oid(to, opts.shard_level);
+        let (segments, leaf) = shard_oid(to, opts.shard_level)?;
         let new_root = build_fanout(self, Some(&root), &segments, &leaf, &source_tree_oid)?;
 
         let msg = format!("metadata: copy {} -> {}", from, to);
@@ -889,10 +932,34 @@ impl MetadataIndex for Repository {
             }
         }
 
-        if !dry_run {
+        if !dry_run && !pruned.is_empty() {
+            let mut root = match resolve_root_tree(self, ref_name)? {
+                Some(t) => t,
+                None => return Ok(pruned),
+            };
+
             for target in &pruned {
-                self.metadata_remove(ref_name, target)?;
+                let (segments, leaf) = match detect_fanout(self, &root, target)? {
+                    Some((segments, leaf, _)) => (segments, leaf),
+                    None => continue,
+                };
+
+                match build_fanout_remove(self, &root, &segments, &leaf)? {
+                    RemoveResult::NotFound => {}
+                    RemoveResult::Empty => {
+                        let mut reference = self.find_reference(ref_name)?;
+                        reference.delete()?;
+                        return Ok(pruned);
+                    }
+                    RemoveResult::Removed(new_root) => {
+                        root = self.find_tree(new_root)?;
+                    }
+                }
             }
+
+            // Single commit for all removals
+            let msg = format!("metadata: prune {} entries", pruned.len());
+            commit_index(self, ref_name, root.id(), &msg)?;
         }
 
         Ok(pruned)
@@ -976,37 +1043,47 @@ impl MetadataIndex for Repository {
             None => return Ok(Vec::new()),
         };
 
-        // Find the key's subtree
-        let key_entry = match root.get_name(key) {
-            Some(e) => e,
-            None => return Ok(Vec::new()),
+        // Find the key's subtree — handle keys containing '/'
+        let key_tree = if key.contains('/') {
+            let components: Vec<&str> = key.split('/').filter(|s| !s.is_empty()).collect();
+            let mut current = root.clone();
+            for component in &components {
+                let next_id = match current.get_name(component) {
+                    Some(e) if e.kind() == Some(git2::ObjectType::Tree) => e.id(),
+                    _ => return Ok(Vec::new()),
+                };
+                current = self.find_tree(next_id)?;
+            }
+            current
+        } else {
+            let key_entry = match root.get_name(key) {
+                Some(e) => e,
+                None => return Ok(Vec::new()),
+            };
+            self.find_tree(key_entry.id())?
         };
-        let key_tree = self.find_tree(key_entry.id())?;
 
         let mut results = Vec::new();
 
         if let Some(rel) = relation {
             // Only look at one relation
             if let Some(rel_entry) = key_tree.get_name(rel)
-                && rel_entry.kind() == Some(git2::ObjectType::Tree) {
-                    let rel_tree = self.find_tree(rel_entry.id())?;
-                    for target_entry in rel_tree.iter() {
-                        if let Some(name) = target_entry.name() {
-                            results.push((rel.to_string(), name.to_string()));
-                        }
-                    }
-                }
+                && rel_entry.kind() == Some(git2::ObjectType::Tree)
+            {
+                let rel_tree = self.find_tree(rel_entry.id())?;
+                collect_leaf_paths(self, &rel_tree, "", &mut |path| {
+                    results.push((rel.to_string(), path));
+                })?;
+            }
         } else {
             // All relations
             for rel_entry in key_tree.iter() {
                 if rel_entry.kind() == Some(git2::ObjectType::Tree) {
                     let rel_name = rel_entry.name().unwrap_or("").to_string();
                     let rel_tree = self.find_tree(rel_entry.id())?;
-                    for target_entry in rel_tree.iter() {
-                        if let Some(name) = target_entry.name() {
-                            results.push((rel_name.clone(), name.to_string()));
-                        }
-                    }
+                    collect_leaf_paths(self, &rel_tree, "", &mut |path| {
+                        results.push((rel_name.clone(), path));
+                    })?;
                 }
             }
         }

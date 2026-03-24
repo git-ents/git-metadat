@@ -607,6 +607,56 @@ fn get_ref_returns_ref_name() {
     );
 }
 
+// ---- shard_level validation ----
+
+#[test]
+fn shard_level_zero_works() {
+    let (_dir, repo) = init_repo();
+    let target = make_target(&repo);
+    let tree_oid = make_tree(&repo);
+    let opts = MetadataOptions {
+        shard_level: 0,
+        force: false,
+    };
+
+    let root = repo.metadata(REF, &target, &tree_oid, &opts).unwrap();
+    repo.metadata_commit(REF, root, "metadata: set").unwrap();
+
+    let got = repo.metadata_get(REF, &target).unwrap();
+    assert_eq!(got, Some(tree_oid));
+}
+
+#[test]
+fn shard_level_max_works() {
+    let (_dir, repo) = init_repo();
+    let target = make_target(&repo);
+    let tree_oid = make_tree(&repo);
+    let opts = MetadataOptions {
+        shard_level: MAX_SHARD_LEVEL,
+        force: false,
+    };
+
+    let root = repo.metadata(REF, &target, &tree_oid, &opts).unwrap();
+    repo.metadata_commit(REF, root, "metadata: set").unwrap();
+
+    let got = repo.metadata_get(REF, &target).unwrap();
+    assert_eq!(got, Some(tree_oid));
+}
+
+#[test]
+fn shard_level_exceeding_max_errors() {
+    let (_dir, repo) = init_repo();
+    let target = make_target(&repo);
+    let tree_oid = make_tree(&repo);
+    let opts = MetadataOptions {
+        shard_level: 20,
+        force: false,
+    };
+
+    let result = repo.metadata(REF, &target, &tree_oid, &opts);
+    assert!(result.is_err());
+}
+
 // ---- glob_matches (unit tests for the helper) ----
 
 #[test]
@@ -751,4 +801,50 @@ fn linked_empty_ref_returns_empty() {
     let (_dir, repo) = init_repo();
     let result = repo.linked(REF, "issue:1", None).unwrap();
     assert!(result.is_empty());
+}
+
+// ---- link/linked with keys containing '/' ----
+
+#[test]
+fn link_with_slash_in_key() {
+    let (_dir, repo) = init_repo();
+    repo.link(
+        REF,
+        "ns/issue:1",
+        "ns/commit:abc",
+        "fixes",
+        "fixed-by",
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        repo.is_linked(REF, "ns/issue:1", "ns/commit:abc", "fixes")
+            .unwrap()
+    );
+    assert!(
+        repo.is_linked(REF, "ns/commit:abc", "ns/issue:1", "fixed-by")
+            .unwrap()
+    );
+}
+
+#[test]
+fn linked_with_slash_in_key() {
+    let (_dir, repo) = init_repo();
+    repo.link(
+        REF,
+        "ns/issue:1",
+        "ns/commit:abc",
+        "fixes",
+        "fixed-by",
+        None,
+    )
+    .unwrap();
+
+    let links = repo.linked(REF, "ns/issue:1", Some("fixes")).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0], ("fixes".to_string(), "ns/commit:abc".to_string()));
+
+    let all = repo.linked(REF, "ns/issue:1", None).unwrap();
+    assert_eq!(all.len(), 1);
 }

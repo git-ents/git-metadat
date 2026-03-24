@@ -60,8 +60,8 @@ pub enum Command {
         #[arg(long)]
         allow_empty: bool,
 
-        /// Fanout depth (number of 2-hex-char directory segments).
-        #[arg(long, default_value_t = 1)]
+        /// Fanout depth (number of 2-hex-char directory segments, max 19).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(0..=19))]
         shard_level: u8,
     },
 
@@ -91,8 +91,8 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
 
-        /// Fanout depth (number of 2-hex-char directory segments).
-        #[arg(long, default_value_t = 1)]
+        /// Fanout depth (number of 2-hex-char directory segments, max 19).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(0..=19))]
         shard_level: u8,
     },
 
