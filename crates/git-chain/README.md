@@ -60,7 +60,3 @@ The commit tree holds only that event's payload blobs — not a running snapshot
 
 Threading works via the second parent: `--parent <commit>` records a reply relationship without forking the main chain.
 `walk --thread` follows these links to reconstruct a conversation or sub-sequence.
-
-## License
-
-MIT OR Apache-2.0

@@ -87,7 +87,3 @@ Each field is a blob stored in the commit's tree under the field name.
 
 IDs are assigned sequentially by default (1, 2, 3, …).
 Pass an explicit ID or `--content-hash` to override.
-
-## License
-
-MIT OR Apache-2.0
