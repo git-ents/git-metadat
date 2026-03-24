@@ -68,6 +68,18 @@ git metadata prune -n  # dry run
 # Print the metadata ref name
 git metadata get-ref
 
+# Create a bidirectional link between two keys
+git metadata link issue:42 commit:abc1234 --forward closes --reverse closed-by
+
+# Remove a bidirectional link
+git metadata unlink issue:42 commit:abc1234 --forward closes --reverse closed-by
+
+# List all links for a key
+git metadata linked issue:42
+
+# List links filtered by relation
+git metadata linked issue:42 --relation closes
+
 # Use a custom ref
 git metadata --ref refs/metadata/custom add labels/bug
 ```
