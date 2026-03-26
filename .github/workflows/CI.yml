@@ -110,26 +110,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-      - name: Cache Cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-
       - name: Generate man pages
         run: |
           cargo run --package git-metadata -- --generate-man target/debug/man
+          cargo run --package git-ledger -- --generate-man target/debug/man
+          cargo run --package git-chain -- --generate-man target/debug/man
 
   ci:
     name: CI
