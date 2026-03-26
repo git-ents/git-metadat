@@ -175,8 +175,8 @@ fn update_delete_field() {
         )
         .unwrap();
 
-    assert!(updated.fields.iter().find(|(k, _)| k == "status").is_none());
-    assert!(updated.fields.iter().find(|(k, _)| k == "title").is_some());
+    assert!(!updated.fields.iter().any(|(k, _)| k == "status"));
+    assert!(updated.fields.iter().any(|(k, _)| k == "title"));
 }
 
 #[test]
@@ -295,15 +295,9 @@ fn delete_nested_field() {
         .unwrap();
 
     // The nested field should be gone
-    assert!(
-        updated
-            .fields
-            .iter()
-            .find(|(k, _)| k == "meta/priority")
-            .is_none()
-    );
+    assert!(!updated.fields.iter().any(|(k, _)| k == "meta/priority"));
     // The non-nested field should remain
-    assert!(updated.fields.iter().find(|(k, _)| k == "title").is_some());
+    assert!(updated.fields.iter().any(|(k, _)| k == "title"));
 }
 
 #[test]
