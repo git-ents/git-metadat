@@ -65,6 +65,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             fields,
             files,
             message,
+            author_name,
+            author_email,
         } => {
             let mut entries: Vec<(String, Vec<u8>)> = fields
                 .iter()
@@ -97,7 +99,22 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 IdStrategy::Sequential
             };
 
-            let entry = repo.create(ref_prefix, &strategy, &parsed, message)?;
+            let author_sig;
+            let author = match author_name {
+                Some(name) => {
+                    let email = author_email.as_deref().unwrap();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let time = git2::Time::new(now, 0);
+                    author_sig = git2::Signature::new(name, email, &time)?;
+                    Some(&author_sig)
+                }
+                None => None,
+            };
+
+            let entry = repo.create(ref_prefix, &strategy, &parsed, message, author)?;
             println!("{}", entry.ref_);
         }
 

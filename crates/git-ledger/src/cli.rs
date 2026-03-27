@@ -44,6 +44,14 @@ pub enum Command {
         /// Commit message.
         #[arg(short, long, default_value = "ledger: create")]
         message: String,
+
+        /// Author name (requires --author-email).
+        #[arg(long, requires = "author_email")]
+        author_name: Option<String>,
+
+        /// Author email (requires --author-name).
+        #[arg(long, requires = "author_name")]
+        author_email: Option<String>,
     },
 
     /// Read a record.

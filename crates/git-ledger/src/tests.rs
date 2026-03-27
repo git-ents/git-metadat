@@ -24,6 +24,7 @@ fn create_sequential() {
             &IdStrategy::Sequential,
             &[("title", b"hello"), ("status", b"open")],
             "create record",
+            None,
         )
         .unwrap();
 
@@ -37,10 +38,22 @@ fn create_sequential_increments() {
     let (_dir, repo) = init_repo();
 
     let e1 = repo
-        .create(PREFIX, &IdStrategy::Sequential, &[("a", b"1")], "first")
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[("a", b"1")],
+            "first",
+            None,
+        )
         .unwrap();
     let e2 = repo
-        .create(PREFIX, &IdStrategy::Sequential, &[("a", b"2")], "second")
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[("a", b"2")],
+            "second",
+            None,
+        )
         .unwrap();
 
     assert_eq!(e1.id, "1");
@@ -57,6 +70,7 @@ fn create_caller_provided() {
             &IdStrategy::CallerProvided("my-record"),
             &[("title", b"test")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -73,6 +87,7 @@ fn create_content_addressed() {
             &IdStrategy::ContentAddressed(b"some content"),
             &[("data", b"value")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -89,6 +104,7 @@ fn create_duplicate_errors() {
         &IdStrategy::CallerProvided("dup"),
         &[("a", b"1")],
         "first",
+        None,
     )
     .unwrap();
     let result = repo.create(
@@ -96,6 +112,7 @@ fn create_duplicate_errors() {
         &IdStrategy::CallerProvided("dup"),
         &[("a", b"2")],
         "second",
+        None,
     );
     assert!(result.is_err());
 }
@@ -110,6 +127,7 @@ fn read_record() {
             &IdStrategy::Sequential,
             &[("title", b"hello"), ("status", b"open")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -138,6 +156,7 @@ fn update_record() {
             &IdStrategy::Sequential,
             &[("title", b"hello"), ("status", b"open")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -164,6 +183,7 @@ fn update_delete_field() {
             &IdStrategy::Sequential,
             &[("title", b"hello"), ("status", b"open")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -189,6 +209,7 @@ fn update_add_field() {
             &IdStrategy::Sequential,
             &[("title", b"hello")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -207,12 +228,30 @@ fn update_add_field() {
 fn list_records() {
     let (_dir, repo) = init_repo();
 
-    repo.create(PREFIX, &IdStrategy::Sequential, &[("a", b"1")], "first")
-        .unwrap();
-    repo.create(PREFIX, &IdStrategy::Sequential, &[("a", b"2")], "second")
-        .unwrap();
-    repo.create(PREFIX, &IdStrategy::Sequential, &[("a", b"3")], "third")
-        .unwrap();
+    repo.create(
+        PREFIX,
+        &IdStrategy::Sequential,
+        &[("a", b"1")],
+        "first",
+        None,
+    )
+    .unwrap();
+    repo.create(
+        PREFIX,
+        &IdStrategy::Sequential,
+        &[("a", b"2")],
+        "second",
+        None,
+    )
+    .unwrap();
+    repo.create(
+        PREFIX,
+        &IdStrategy::Sequential,
+        &[("a", b"3")],
+        "third",
+        None,
+    )
+    .unwrap();
 
     let ids = repo.list(PREFIX).unwrap();
     assert_eq!(ids, vec!["1", "2", "3"]);
@@ -235,6 +274,7 @@ fn history_tracks_updates() {
             &IdStrategy::Sequential,
             &[("status", b"open")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -265,6 +305,7 @@ fn create_with_nested_fields() {
             &IdStrategy::Sequential,
             &[("meta/priority", b"high"), ("title", b"hello")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -283,6 +324,7 @@ fn delete_nested_field() {
             &IdStrategy::Sequential,
             &[("meta/priority", b"high"), ("title", b"hello")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -310,6 +352,7 @@ fn delete_nested_field_removes_empty_parent() {
             &IdStrategy::Sequential,
             &[("meta/priority", b"high")],
             "create",
+            None,
         )
         .unwrap();
 
@@ -335,6 +378,7 @@ fn create_commit_oid() {
             &IdStrategy::CommitOid,
             &[("title", b"hello"), ("status", b"open")],
             "create record",
+            None,
         )
         .unwrap();
 

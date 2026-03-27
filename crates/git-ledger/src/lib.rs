@@ -41,12 +41,16 @@ pub enum Mutation<'a> {
 /// Core ledger operations.
 pub trait Ledger {
     /// Create a new record under `ref_prefix`.
+    ///
+    /// `author` overrides the commit author; when `None`, `self.signature()` is
+    /// used for both author and committer.
     fn create(
         &self,
         ref_prefix: &str,
         strategy: &IdStrategy<'_>,
         fields: &[(&str, &[u8])],
         message: &str,
+        author: Option<&git2::Signature<'_>>,
     ) -> Result<LedgerEntry, Error>;
 
     /// Read an existing record by its full ref name.
@@ -216,14 +220,22 @@ impl Ledger for Repository {
         strategy: &IdStrategy<'_>,
         fields: &[(&str, &[u8])],
         message: &str,
+        author: Option<&git2::Signature<'_>>,
     ) -> Result<LedgerEntry, Error> {
         let tree_oid = build_fields_tree(self, fields)?;
         let tree = self.find_tree(tree_oid)?;
-        let sig = self.signature()?;
+        let committer = self.signature()?;
+        let owned_author;
+        let author = match author {
+            Some(a) => a,
+            None => {
+                owned_author = self.signature()?;
+                &owned_author
+            }
+        };
 
         if let IdStrategy::CommitOid = strategy {
-            // Write the commit first (no ref), then name the ref after its OID.
-            let commit_oid = self.commit(None, &sig, &sig, message, &tree, &[])?;
+            let commit_oid = self.commit(None, author, &committer, message, &tree, &[])?;
             let ref_name = if ref_prefix.ends_with('/') {
                 format!("{}{}", ref_prefix, commit_oid)
             } else {
@@ -258,7 +270,6 @@ impl Ledger for Repository {
             format!("{}/{}", ref_prefix, id)
         };
 
-        // Check the ref doesn't already exist
         if self.find_reference(&ref_name).is_ok() {
             return Err(Error::from_str(&format!(
                 "record already exists: {}",
@@ -266,14 +277,7 @@ impl Ledger for Repository {
             )));
         }
 
-        let commit_oid = self.commit(
-            Some(&ref_name),
-            &sig,
-            &sig,
-            message,
-            &tree,
-            &[], // no parents for first commit
-        )?;
+        let commit_oid = self.commit(Some(&ref_name), author, &committer, message, &tree, &[])?;
 
         let fields = read_fields(self, &tree, "")?;
         let id = ref_name.rsplit('/').next().unwrap_or(&ref_name).to_string();
