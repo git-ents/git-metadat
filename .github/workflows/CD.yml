@@ -62,7 +62,6 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           CRATE="${{ needs.check-tag.outputs.crate-name }}"
           if [ -n "$CRATE" ]; then
@@ -70,8 +69,4 @@ jobs:
           else
             PKG_FLAG="--workspace"
           fi
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            cargo publish $PKG_FLAG --dry-run
-          else
-            cargo publish $PKG_FLAG --token "$CARGO_REGISTRY_TOKEN"
-          fi
+          cargo publish $PKG_FLAG --token "$CARGO_REGISTRY_TOKEN"
