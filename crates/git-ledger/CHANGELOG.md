@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.0-alpha.3](https://github.com/git-ents/git-data/compare/git-ledger-v0.1.0-alpha.2...git-ledger-v0.1.0-alpha.3) (2026-03-27)
+
+
+### Features
+
+* Accept optional author signature in Ledger::create ([cb4d735](https://github.com/git-ents/git-data/commit/cb4d735638eebdb907cf69bd0bf5d839268513c7)), closes [#10](https://github.com/git-ents/git-data/issues/10)
+* Add --author-name and --author-email to create subcommand ([cb4d735](https://github.com/git-ents/git-data/commit/cb4d735638eebdb907cf69bd0bf5d839268513c7))
+* Add optional author override to Ledger::create ([cb4d735](https://github.com/git-ents/git-data/commit/cb4d735638eebdb907cf69bd0bf5d839268513c7))
+
 ## [0.1.0-alpha.2](https://github.com/git-ents/git-data/compare/git-ledger-v0.1.0-alpha.1...git-ledger-v0.1.0-alpha.2) (2026-03-27)
 
 
