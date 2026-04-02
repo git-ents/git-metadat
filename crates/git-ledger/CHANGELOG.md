@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0-alpha.4](https://github.com/git-ents/git-data/compare/git-ledger-v0.1.0-alpha.3...git-ledger-v0.1.0-alpha.4) (2026-04-02)
+
+
+### Features
+
+* Add FileMode enum (Blob, Executable, Tree, Commit) ([c72b96c](https://github.com/git-ents/git-data/commit/c72b96ca0ca85cb91daa585f3db2be653120a6e8))
+* Add Mutation::Pin for inserting entries that reference existing objects ([c72b96c](https://github.com/git-ents/git-data/commit/c72b96ca0ca85cb91daa585f3db2be653120a6e8))
+
 ## [0.1.0-alpha.3](https://github.com/git-ents/git-data/compare/git-ledger-v0.1.0-alpha.2...git-ledger-v0.1.0-alpha.3) (2026-03-27)
 
 
