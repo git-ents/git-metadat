@@ -30,12 +30,38 @@ pub enum IdStrategy<'a> {
     CommitOid,
 }
 
+/// The file mode for a pinned tree entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// Regular file (0o100644).
+    Blob,
+    /// Executable file (0o100755).
+    Executable,
+    /// Subtree (0o040000).
+    Tree,
+    /// Gitlink / submodule commit (0o160000).
+    Commit,
+}
+
+impl FileMode {
+    fn as_raw(self) -> i32 {
+        match self {
+            FileMode::Blob => 0o100644,
+            FileMode::Executable => 0o100755,
+            FileMode::Tree => 0o040000,
+            FileMode::Commit => 0o160000,
+        }
+    }
+}
+
 /// A mutation to apply to a record's fields.
 pub enum Mutation<'a> {
     /// Upsert a field.
     Set(&'a str, &'a [u8]),
     /// Delete a field.
     Delete(&'a str),
+    /// Insert a tree entry pointing at an existing git object with the given file mode.
+    Pin(&'a str, Oid, FileMode),
 }
 
 /// Core ledger operations.
@@ -48,7 +74,7 @@ pub trait Ledger {
         &self,
         ref_prefix: &str,
         strategy: &IdStrategy<'_>,
-        fields: &[(&str, &[u8])],
+        mutations: &[Mutation<'_>],
         message: &str,
         author: Option<&git2::Signature<'_>>,
     ) -> Result<LedgerEntry, Error>;
@@ -75,16 +101,17 @@ pub trait Ledger {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Recursively insert a blob at an arbitrary depth inside a tree builder.
+/// Recursively insert a tree entry at an arbitrary depth inside a tree builder.
 fn insert_nested(
     repo: &Repository,
     builder: &mut git2::TreeBuilder<'_>,
     components: &[&str],
-    blob_oid: Oid,
+    oid: Oid,
+    mode: i32,
 ) -> Result<(), Error> {
     match components {
         [leaf] => {
-            builder.insert(leaf, blob_oid, 0o100644)?;
+            builder.insert(leaf, oid, mode)?;
         }
         [head, rest @ ..] => {
             let mut sub_builder = if let Some(existing) = builder.get(head)? {
@@ -93,7 +120,7 @@ fn insert_nested(
             } else {
                 repo.treebuilder(None)?
             };
-            insert_nested(repo, &mut sub_builder, rest, blob_oid)?;
+            insert_nested(repo, &mut sub_builder, rest, oid, mode)?;
             let sub_tree = sub_builder.write()?;
             builder.insert(head, sub_tree, 0o040000)?;
         }
@@ -135,13 +162,22 @@ fn remove_nested(
     Ok(builder.is_empty())
 }
 
-/// Build a tree from a list of field name/value pairs.
-fn build_fields_tree(repo: &Repository, fields: &[(&str, &[u8])]) -> Result<Oid, Error> {
+/// Build a tree from a list of mutations (Set and Pin only; Delete is a no-op at create time).
+fn build_mutation_tree(repo: &Repository, mutations: &[Mutation<'_>]) -> Result<Oid, Error> {
     let mut builder = repo.treebuilder(None)?;
-    for (name, value) in fields {
-        let blob_oid = repo.blob(value)?;
-        let components: Vec<&str> = name.split('/').collect();
-        insert_nested(repo, &mut builder, &components, blob_oid)?;
+    for mutation in mutations {
+        match mutation {
+            Mutation::Set(name, value) => {
+                let blob_oid = repo.blob(value)?;
+                let components: Vec<&str> = name.split('/').collect();
+                insert_nested(repo, &mut builder, &components, blob_oid, 0o100644)?;
+            }
+            Mutation::Pin(name, oid, mode) => {
+                let components: Vec<&str> = name.split('/').collect();
+                insert_nested(repo, &mut builder, &components, *oid, mode.as_raw())?;
+            }
+            Mutation::Delete(_) => {}
+        }
     }
     builder.write()
 }
@@ -218,11 +254,11 @@ impl Ledger for Repository {
         &self,
         ref_prefix: &str,
         strategy: &IdStrategy<'_>,
-        fields: &[(&str, &[u8])],
+        mutations: &[Mutation<'_>],
         message: &str,
         author: Option<&git2::Signature<'_>>,
     ) -> Result<LedgerEntry, Error> {
-        let tree_oid = build_fields_tree(self, fields)?;
+        let tree_oid = build_mutation_tree(self, mutations)?;
         let tree = self.find_tree(tree_oid)?;
         let committer = self.signature()?;
         let owned_author;
@@ -324,11 +360,15 @@ impl Ledger for Repository {
                 Mutation::Set(name, value) => {
                     let blob_oid = self.blob(value)?;
                     let components: Vec<&str> = name.split('/').collect();
-                    insert_nested(self, &mut builder, &components, blob_oid)?;
+                    insert_nested(self, &mut builder, &components, blob_oid, 0o100644)?;
                 }
                 Mutation::Delete(name) => {
                     let components: Vec<&str> = name.split('/').collect();
                     remove_nested(self, &mut builder, &components)?;
+                }
+                Mutation::Pin(name, oid, mode) => {
+                    let components: Vec<&str> = name.split('/').collect();
+                    insert_nested(self, &mut builder, &components, *oid, mode.as_raw())?;
                 }
             }
         }

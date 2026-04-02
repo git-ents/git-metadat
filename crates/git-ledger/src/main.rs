@@ -68,24 +68,23 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             author_name,
             author_email,
         } => {
-            let mut entries: Vec<(String, Vec<u8>)> = fields
+            let mut file_contents: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut parsed: Vec<Mutation<'_>> = fields
                 .iter()
                 .map(|f| {
                     let (k, v) = parse_field(f);
-                    (k.to_string(), v.as_bytes().to_vec())
+                    Mutation::Set(k, v.as_bytes())
                 })
                 .collect();
 
             for f in files {
                 let (key, path) = parse_file_arg(f)?;
                 let content = std::fs::read(path)?;
-                entries.push((key.to_string(), content));
+                file_contents.push((key.to_string(), content));
             }
-
-            let parsed: Vec<(&str, &[u8])> = entries
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_slice()))
-                .collect();
+            for entry in &file_contents {
+                parsed.push(Mutation::Set(&entry.0, &entry.1));
+            }
 
             let stdin_buf;
             let strategy = if *content_hash {

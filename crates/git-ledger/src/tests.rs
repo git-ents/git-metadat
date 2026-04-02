@@ -22,7 +22,10 @@ fn create_sequential() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("title", b"hello"), ("status", b"open")],
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Set("status", b"open"),
+            ],
             "create record",
             None,
         )
@@ -41,7 +44,7 @@ fn create_sequential_increments() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("a", b"1")],
+            &[Mutation::Set("a", b"1")],
             "first",
             None,
         )
@@ -50,7 +53,7 @@ fn create_sequential_increments() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("a", b"2")],
+            &[Mutation::Set("a", b"2")],
             "second",
             None,
         )
@@ -68,7 +71,7 @@ fn create_caller_provided() {
         .create(
             PREFIX,
             &IdStrategy::CallerProvided("my-record"),
-            &[("title", b"test")],
+            &[Mutation::Set("title", b"test")],
             "create",
             None,
         )
@@ -85,7 +88,7 @@ fn create_content_addressed() {
         .create(
             PREFIX,
             &IdStrategy::ContentAddressed(b"some content"),
-            &[("data", b"value")],
+            &[Mutation::Set("data", b"value")],
             "create",
             None,
         )
@@ -102,7 +105,7 @@ fn create_duplicate_errors() {
     repo.create(
         PREFIX,
         &IdStrategy::CallerProvided("dup"),
-        &[("a", b"1")],
+        &[Mutation::Set("a", b"1")],
         "first",
         None,
     )
@@ -110,7 +113,7 @@ fn create_duplicate_errors() {
     let result = repo.create(
         PREFIX,
         &IdStrategy::CallerProvided("dup"),
-        &[("a", b"2")],
+        &[Mutation::Set("a", b"2")],
         "second",
         None,
     );
@@ -125,7 +128,10 @@ fn read_record() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("title", b"hello"), ("status", b"open")],
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Set("status", b"open"),
+            ],
             "create",
             None,
         )
@@ -154,7 +160,10 @@ fn update_record() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("title", b"hello"), ("status", b"open")],
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Set("status", b"open"),
+            ],
             "create",
             None,
         )
@@ -181,7 +190,10 @@ fn update_delete_field() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("title", b"hello"), ("status", b"open")],
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Set("status", b"open"),
+            ],
             "create",
             None,
         )
@@ -207,7 +219,7 @@ fn update_add_field() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("title", b"hello")],
+            &[Mutation::Set("title", b"hello")],
             "create",
             None,
         )
@@ -231,7 +243,7 @@ fn list_records() {
     repo.create(
         PREFIX,
         &IdStrategy::Sequential,
-        &[("a", b"1")],
+        &[Mutation::Set("a", b"1")],
         "first",
         None,
     )
@@ -239,7 +251,7 @@ fn list_records() {
     repo.create(
         PREFIX,
         &IdStrategy::Sequential,
-        &[("a", b"2")],
+        &[Mutation::Set("a", b"2")],
         "second",
         None,
     )
@@ -247,7 +259,7 @@ fn list_records() {
     repo.create(
         PREFIX,
         &IdStrategy::Sequential,
-        &[("a", b"3")],
+        &[Mutation::Set("a", b"3")],
         "third",
         None,
     )
@@ -272,7 +284,7 @@ fn history_tracks_updates() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("status", b"open")],
+            &[Mutation::Set("status", b"open")],
             "create",
             None,
         )
@@ -303,7 +315,10 @@ fn create_with_nested_fields() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("meta/priority", b"high"), ("title", b"hello")],
+            &[
+                Mutation::Set("meta/priority", b"high"),
+                Mutation::Set("title", b"hello"),
+            ],
             "create",
             None,
         )
@@ -322,7 +337,10 @@ fn delete_nested_field() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("meta/priority", b"high"), ("title", b"hello")],
+            &[
+                Mutation::Set("meta/priority", b"high"),
+                Mutation::Set("title", b"hello"),
+            ],
             "create",
             None,
         )
@@ -350,7 +368,7 @@ fn delete_nested_field_removes_empty_parent() {
         .create(
             PREFIX,
             &IdStrategy::Sequential,
-            &[("meta/priority", b"high")],
+            &[Mutation::Set("meta/priority", b"high")],
             "create",
             None,
         )
@@ -376,7 +394,10 @@ fn create_commit_oid() {
         .create(
             PREFIX,
             &IdStrategy::CommitOid,
-            &[("title", b"hello"), ("status", b"open")],
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Set("status", b"open"),
+            ],
             "create record",
             None,
         )
@@ -390,4 +411,71 @@ fn create_commit_oid() {
     // Should be readable back
     let read = repo.read(&entry.ref_).unwrap();
     assert_eq!(read.fields, entry.fields);
+}
+
+#[test]
+fn pin_blob_in_create() {
+    let (_dir, repo) = init_repo();
+
+    let existing_blob = repo.blob(b"pinned content").unwrap();
+
+    let entry = repo
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[
+                Mutation::Set("title", b"hello"),
+                Mutation::Pin("objects/pinned", existing_blob, FileMode::Blob),
+            ],
+            "create with pin",
+            None,
+        )
+        .unwrap();
+
+    // The tree entry for "objects/pinned" must point at the pre-existing blob OID.
+    let commit = repo.find_commit(entry.commit).unwrap();
+    let tree = commit.tree().unwrap();
+    let pinned = tree
+        .get_path(std::path::Path::new("objects/pinned"))
+        .unwrap();
+    assert_eq!(pinned.id(), existing_blob);
+    assert_eq!(pinned.filemode(), 0o100644);
+}
+
+#[test]
+fn pin_gitlink_in_update() {
+    let (_dir, repo) = init_repo();
+
+    let entry = repo
+        .create(
+            PREFIX,
+            &IdStrategy::Sequential,
+            &[Mutation::Set("title", b"hello")],
+            "create",
+            None,
+        )
+        .unwrap();
+
+    // Use the record's own commit OID as the gitlink target.
+    let target_oid = entry.commit;
+
+    let updated = repo
+        .update(
+            &entry.ref_,
+            &[Mutation::Pin(
+                "objects/target",
+                target_oid,
+                FileMode::Commit,
+            )],
+            "pin gitlink",
+        )
+        .unwrap();
+
+    let commit = repo.find_commit(updated.commit).unwrap();
+    let tree = commit.tree().unwrap();
+    let pinned = tree
+        .get_path(std::path::Path::new("objects/target"))
+        .unwrap();
+    assert_eq!(pinned.id(), target_oid);
+    assert_eq!(pinned.filemode(), 0o160000);
 }
