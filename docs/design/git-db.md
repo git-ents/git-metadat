@@ -2,9 +2,9 @@
 
 **Project:** `git-db` **Organization:** `git-ainur` **Status:** Draft — design document **Author:** Joey Carpinelli **Date:** April 2026 **References:**
 
-- [ea-design-doc.md](ea-design-doc.md) — Original ea design (historical)
-- [ea-revised-design-doc.md](ea-revised-design-doc.md) — Abstract kernel specification
-- [ea-gix-design-doc.md](ea-gix-design-doc.md) — Git backend implementation
+- [ea-design-doc.md](https://github.com/git-ents/git-data/blob/feat/db/docs/design/ea-design-doc.md) — Original ea design (historical)
+- [ea-revised-design-doc.md](https://github.com/git-ents/git-data/blob/feat/db/docs/design/ea-revised-design-doc.md) — Abstract kernel specification
+- [ea-gix-design-doc.md](https://github.com/git-ents/git-data/blob/feat/db/docs/design/ea-gix-design-doc.md) — Git backend implementation
 
 ---
 
@@ -21,6 +21,8 @@ There is no plumbing layer for structured data.
 
 `git-db` is that layer.
 
+---
+
 ## 1. What git-db Is
 
 A Rust library (`git-db`) and a set of CLI plumbing commands (`git db`) for transactional, typed, structured data operations over a standard git repository.
@@ -33,11 +35,13 @@ Everything is git objects and refs.
 
 A database created by `git-db` coexists in the same `.git` as source code.
 Source lives in `refs/heads/`.
-Structured data lives in `refs/db/<name>`.
+Structured data lives in `refs/db/<n>`.
 They share the ODB, packfiles, and transport.
 `git push` pushes both.
 `git clone` fetches both.
 If they reference the same blobs, deduplication is automatic.
+
+---
 
 ## 2. Foundation Traits
 
@@ -94,15 +98,17 @@ pub trait Pointer {
 3. **Consistency.**
    After a successful `cas(old, new)`, `read()` returns `new` absent further writes.
 
-The git implementation: `Pointer` = git ref under `refs/db/<name>`.
+The git implementation: `Pointer` = git ref under `refs/db/<n>`.
 CAS via gix ref transaction (lockfile, verify, update, rename).
 Fallback to `git update-ref --stdin` for reftable or other backends gix doesn't yet support.
 
 ### 2.3 Closure Property
 
 Any `ContentAddressable` store can store the complete serialized state of any other `ContentAddressable` store as a single value.
-This is structural, not a special feature — it falls out of `Value` being general enough to contain arbitrary bytes.
-The property guarantees interoperability: a git-db database can embed another git-db database, and backend bootstrapping (implementing new backends using existing ones as scaffolding) is always available.
+This is structural — it falls out of `Value` being general enough to contain arbitrary bytes.
+The property guarantees interoperability: a git-db database can embed another git-db database, and backend bootstrapping is always available.
+
+---
 
 ## 3. Primitives
 
@@ -162,7 +168,6 @@ Disjoint keys auto-merge.
 Same-key conflicts resolved by pluggable policy (last-writer-wins, preserve-both, custom function).
 
 CRDT equivalence: with LWW-Register semantics per key, a ledger is a conflict-free OR-Map.
-Two peers mutate independently; sync converges deterministically.
 
 ### 3.3 Policy Annotations
 
@@ -170,10 +175,17 @@ Other data structure types are not new primitives — they are chains or ledgers
 
 | Type | Realization |
 |---|---|
-| Metadata / index | Ledger + `derived` (rebuildable from other primitives, skipped during merge) |
+| Derived index | Ledger + `derived` (maintained inline by writers; rebuilt after merge from primary data) |
 | Immutable store | Ledger + `write-once` (key = content hash, no overwrite) |
-| Ephemeral state | Chain or Ledger + `local-only` (excluded from push/fetch) |
+| Local state | Chain or Ledger + `local-only` (excluded from push/fetch; lives under `refs/db-local/<n>`) |
 | Conflict record | Ledger with keys `base`, `left`, `right` + `.db-type` = `conflict` |
+
+`derived` indexes are not lazily invalidated and recomputed.
+Writers maintain them atomically in the same transaction as the primary write.
+The `derived` annotation exists to tell the merge dispatcher to rebuild the index from primary data after a merge rather than attempting to merge the index directly.
+
+`local-only` ledgers and chains are stored under a separate local ref (`refs/db-local/<n>`) that is never advertised during `upload-pack`.
+They use the same transaction machinery as shared data.
 
 ### 3.4 Recursive Composition
 
@@ -183,7 +195,74 @@ A chain entry can contain a ledger.
 Recursion bottoms out at opaque blobs (application-defined content).
 A `.db-type` marker blob at each typed subtree root tells the merge dispatcher which strategy to apply.
 
-## 4. Transaction
+---
+
+## 4. Type Definitions via Facet
+
+Rust consumers define git-db types using the [facet](https://github.com/facet-rs/facet) reflection library.
+The Rust type definition is the authoritative source for serialization layout, merge strategy, and type registration.
+No separate schema files.
+No manual registry entries.
+
+### 4.1 The GitDbType Trait
+
+```rust
+pub trait GitDbType: facet::Facet {
+    /// The `.db-type` marker written to the state tree.
+    /// Derived from the facet type name by default.
+    const MARKER: &'static str;
+
+    /// The merge strategy for this type.
+    /// Derived from type structure and facet attributes by default.
+    type MergeStrategy: MergeStrategy;
+}
+```
+
+Implementations are derived, not hand-written:
+
+```rust
+#[derive(Facet, GitDbType)]
+struct ForgeIssue {
+    title: String,
+    #[facet(merge = "lww")]
+    state: IssueState,
+    labels: LabelSet,
+}
+```
+
+The derive macro:
+
+1. Walks the facet `SHAPE` to produce the git tree layout (struct fields → named blobs,
+   nested structs → subtrees).
+2. Reads `#[facet(merge = "...")]` attributes to select per-field merge strategies.
+3. Sets `MARKER` from the type name.
+4. Writes `MARKER` and the strategy name to `.db/type-registry` on `db init`.
+
+### 4.2 Merge Strategy Derivation
+
+Default strategy selection from shape:
+
+| Shape | Default strategy |
+|---|---|
+| Named struct | Ledger merge (field-by-field) |
+| `Vec<T>` | Chain merge (causal interleave) |
+| `Option<T>` | LWW |
+| Scalar blob | LWW |
+
+Override per field with `#[facet(merge = "...")]`.
+The strategy name must be registered in the `StrategyMap` — either a built-in or an application-provided implementation.
+
+### 4.3 CLI and Shell Consumers
+
+The CLI cannot use Rust trait impls directly.
+For CLI and shell porcelains, the `.db/type-registry` ledger (written at `db init` by the Rust consumer) provides string → strategy mappings that the merge dispatcher reads at runtime.
+The Rust type definition is the source of truth; the registry blob is derived from it.
+
+Shell porcelains that never call `db merge` do not need the registry at all.
+
+---
+
+## 5. Transaction
 
 ```rust
 pub struct Db { /* gix::Repository + ref name */ }
@@ -233,32 +312,68 @@ One CAS per transaction.
 Arbitrarily many mutations per transaction.
 Structural sharing: unchanged subtrees referenced by existing OID.
 
-## 5. State Tree Layout
+**Writers maintain derived indexes in the same transaction as primary writes.**
+There is no separate invalidation pass.
+A transaction that creates an issue also updates `index/issues-by-display-id/`.
+Atomicity is free — it is already a single CAS.
+
+---
+
+## 6. State Tree Layout
 
 ```text
-refs/db/<name>  →  commit (transaction N)
+refs/db/<n>  →  commit (transaction N)
                      └── tree (root state)
                          ├── .db-type             → blob: "db-root"
                          ├── .db/                  → self-hosted metadata
                          │   ├── .db-type          → blob: "ledger"
                          │   ├── schema-version    → blob: "0.1"
-                         │   ├── type-registry/    → ledger: type → merge strategy
+                         │   ├── type-registry/    → ledger: type marker → merge strategy name
                          │   └── annotations/      → ledger: path → policy
                          ├── <user-defined>/
                          │   ├── .db-type          → blob: "ledger" | "chain"
                          │   └── ...
                          └── ...
+
+refs/db-local/<n>  →  commit (local-only state)
+                           └── tree
+                               └── <user-defined local data>/
 ```
 
 The `.db/` subtree is a ledger like any other — self-hosted, versioned, auditable.
-The first transaction on `db init` writes it.
+The first transaction on `db init` writes it, populated from registered `GitDbType` implementations.
 No external config files.
 
-Nested chains use embedded representation (Option A): entries are subtrees within the parent, named by sequence number.
+`refs/db-local/<n>` follows the same tree conventions but is never advertised during `upload-pack`.
+Local-only chains and ledgers live here.
+
+Nested chains use embedded representation: entries are subtrees within the parent, named by sequence number.
 History is recovered from the enclosing transaction chain.
 This preserves git reachability for GC and clone.
 
-## 6. Merge
+---
+
+## 7. Derived Indexes
+
+Derived indexes are ledgers maintained atomically by writers, not lazily recomputed by readers.
+
+**Rule:** any transaction that mutates primary data must also update all `derived` ledgers that index that data, in the same `Tx`.
+The `commit()` call is a single CAS covering both.
+
+**On merge:** the merge dispatcher skips `derived` ledgers (per their policy annotation) and instead rebuilds them from the merged primary data.
+This is a single tree walk over the merged state, not a dependency graph traversal.
+
+**OID-based cache validity:** the subtree OID is the revision identifier for any subtree.
+A process-local in-memory cache may store `(input_subtree_oid → derived_value)`.
+Cache validity is a hash comparison.
+No framework required.
+If the OID of `issues/` matches the last-seen OID, the cached issue list is valid.
+
+This pattern — writer-maintained indexes, OID-keyed process cache — covers the practical needs of porcelains like forge without external dependencies.
+
+---
+
+## 8. Merge
 
 ```rust
 pub fn merge(
@@ -286,56 +401,101 @@ pub enum MergeResult {
 Dispatcher walks base, left, right trees in parallel.
 At each node:
 
-1. Same OID in left and right → keep (no change, or identical change).
+1. Same OID in left and right → keep.
 2. Changed in one fork only → take the change.
-3. Changed in both → read `.db-type`, dispatch to registered strategy.
+3. `derived` annotation → skip; rebuild from merged primary data after dispatch
+   completes.
+4. Changed in both → read `.db-type`, dispatch to registered strategy.
 
-Strategies are registered per type marker in `StrategyMap`.
-Built-in strategies for chain (causal interleave) and ledger (key-by-key).
-Applications provide custom strategies for domain-specific types.
+For Rust consumers, strategies are registered from `GitDbType` implementations at startup.
+For CLI consumers, strategies are loaded from `.db/type-registry`.
+The dispatcher does not distinguish between the two sources.
 
 Recursive: if a conflicting entry is a typed subtree, the dispatcher recurses.
 Conflicts at leaves propagate upward as conflict records.
 
-## 7. Incremental Computation
+---
 
-Derived state (indexes, caches, computed summaries) uses demand-driven invalidation keyed on subtree OIDs.
+## 9. Query Layer
 
-**Dependency table** (stored in optional local SQLite cache, not in git):
+git-db's tree structure enables a useful query layer without SQL or a separate query engine.
+
+### 9.1 Structural Properties
+
+| Property | What it enables |
+|---|---|
+| Hierarchical key layout | Path wildcard traversal |
+| Blob values at known paths | Predicate filtering without full scan |
+| Subtree OID stability | Result caching keyed on OID |
+| Structural sharing | Incremental re-query over changed subtrees only |
+
+### 9.2 Path Algebra
+
+The natural query interface is path algebra, not SQL:
 
 ```text
-derived_key → [(input_path, last_seen_oid), ...]
+issues/*/state                    -- enumerate all issues, get state blob
+issues/*/[state="open"]           -- filter by blob value at known path
+reviews/*/approvals/*/*           -- two-level wildcard
+issues/*/[state="open"]/title     -- project after filter
 ```
 
-**On transaction commit:** diff old and new root trees → set of changed paths → scan dependency table → mark stale derived values.
+These translate directly to: enumerate a subtree, fetch a blob at a relative path, filter, project.
+No full object-store scan.
+O(N × depth) where N is the size of the enumerated subtree.
 
-**On read of stale derived value:** recompute from current inputs, cache result, update dependency table.
+### 9.3 Index-Aware Planning
 
-This is Salsa's red-green algorithm mapped onto Merkle structure.
-The subtree OID is the revision identifier.
-Cache invalidation is a hash comparison, not a tree walk.
+A query planner that knows which paths carry `derived` ledger indexes can rewrite predicates:
 
-## 8. CLI Plumbing Commands
+```text
+issues/*/[display-id="GH#42"]
+  → rewrite to: index/issues-by-display-id/GH#42
+  → O(depth) instead of O(N × depth)
+```
+
+The planner reads `derived` annotations from `.db/annotations/`.
+No separate schema required.
+Porcelains that maintain good indexes get fast queries automatically.
+
+### 9.4 OID Cache Integration
+
+A query over `issues/*/state` touches a predictable set of subtree OIDs.
+If the OID of `issues/` has not changed since the last execution, the result is valid without re-reading any blobs.
+The query layer tracks input OIDs per query and short-circuits on match.
+This is structural, not a framework feature.
+
+### 9.5 Limitations
+
+Cross-path joins with no common key require either a purpose-built index or an in-memory join over two full subtree scans.
+The query layer does not help here beyond what explicit indexes provide.
+Porcelains that need joins should maintain join-supporting indexes at write time.
+
+---
+
+## 10. CLI Plumbing Commands
 
 `git db` provides the CLI equivalent of every library operation, following git's convention of low-level plumbing commands that porcelains compose.
 
-### 8.1 Database Lifecycle
+### 10.1 Database Lifecycle
 
 ```text
-git db init <name>
-    Create a new database. Writes .db/ metadata subtree, creates refs/db/<name>.
+git db init <n>
+    Create a new database. Writes .db/ metadata subtree, creates refs/db/<n>.
+    Registers GitDbType implementations if called from a Rust binary; otherwise
+    writes an empty type registry.
 
 git db list
     List all databases in the repository (enumerate refs/db/*).
 
-git db drop <name>
-    Delete a database (remove refs/db/<name>, objects GC'd normally).
+git db drop <n>
+    Delete a database (remove refs/db/<n>, objects GC'd normally).
 ```
 
-### 8.2 Transaction Commands
+### 10.2 Transaction Commands
 
 ```text
-git db tx begin <name>
+git db tx begin <n>
     Start a transaction. Prints a transaction ID (the snapshot OID).
     Writes transaction state to .git/db-tx/<txid>.
 
@@ -348,8 +508,8 @@ git db tx put <txid> <path> [--stdin | --file=<f> | <literal>]
 git db tx delete <txid> <path>
     Stage a deletion.
 
-git db tx append <txid> <path> [--stdin | --file=<f> | <literal>]
-    Stage a chain append.
+git db tx append <txid> <path> [--stdin | --file=<f> | --tree <k=v>...]
+    Stage a chain append. --tree accepts named blob pairs for structured entries.
 
 git db tx log <txid> <path>
     Print chain entries to stdout.
@@ -366,56 +526,70 @@ git db tx abort <txid>
 
 Transaction state files in `.git/db-tx/` are local, ephemeral, and deleted on commit or abort.
 
-### 8.3 History and Inspection
+### 10.3 History and Inspection
 
 ```text
-git db log <name> [-n <count>]
-    Print transaction history (commit log of refs/db/<name>).
+git db log <n> [-n <count>]
+    Print transaction history (commit log of refs/db/<n>).
 
-git db show <name> [<path>]
+git db show <n> [<path>]
     Print current state at path. Without path, prints root tree.
 
-git db diff <name> <oid-a> <oid-b> [<path>]
+git db diff <n> <oid-a> <oid-b> [<path>]
     Diff two states. Output is path-level: added/modified/deleted keys.
 
-git db cat <name> <oid>
+git db cat <n> <oid>
     Print raw content of an object by OID.
 ```
 
-### 8.4 Merge
+### 10.4 Merge
 
 ```text
-git db merge <name> <left-oid> <right-oid> [--strategy=<s>]
-    Three-way merge. Prints result OID and conflict summary.
-    Strategies loaded from .db/type-registry or --strategy flag.
+git db merge <n> <left-oid> <right-oid> [--strategy=<s>]
+    Three-way merge. Derived ledgers rebuilt from merged primary data.
+    Prints result OID and conflict summary.
 
-git db conflicts <name> <oid>
+git db conflicts <n> <oid>
     List unresolved conflicts in a merge result.
 
-git db resolve <name> <oid> <path> [--take=left|right|base] [--value=<v>]
+git db resolve <n> <oid> <path> [--take=left|right|base] [--value=<v>]
     Resolve a single conflict. Produces a new state OID.
 ```
 
-### 8.5 Schema and Types
+### 10.5 Query
 
 ```text
-git db type register <name> <type-name> [--merge-strategy=<s>]
-    Register a type marker and its merge strategy.
+git db query <n> <path-pattern> [--where <path>=<value>] [--select <path>]
+    Path algebra query. Enumerates matching entries, applies predicates,
+    projects selected subpaths. Uses index rewriting if applicable.
 
-git db type list <name>
+git db query <n> --explain <path-pattern> [--where <path>=<value>]
+    Show query plan: which paths are scanned, which indexes are used.
+```
+
+### 10.6 Schema and Types
+
+```text
+git db type register <n> <type-name> [--merge-strategy=<s>]
+    Register a type marker and its merge strategy in .db/type-registry.
+    Normally written automatically by GitDbType::init(); use manually for
+    shell-only porcelains.
+
+git db type list <n>
     List registered types and strategies.
 
-git db annotate <name> <path> <annotation>
+git db annotate <n> <path> <annotation>
     Set a policy annotation (derived, write-once, local-only) on a path.
 ```
 
-## 9. Usage Example: forge
+---
 
-**forge** is a local-first issue and code-review tracker stored entirely in git.
+## 11. Usage Example: forge
+
+forge is a local-first issue and code-review tracker stored entirely in git.
 It is the primary reference porcelain for git-db and drives all API design decisions.
-Its data requirements are more complex than toy examples: threaded comments anchored to git objects, stateful reviews with per-commit approvals, and derived indexes for fast lookup.
 
-### 9.1 State Tree Layout
+### 11.1 State Tree Layout
 
 forge uses a single database (`refs/db/forge`) with four top-level namespaces:
 
@@ -445,10 +619,10 @@ refs/db/forge
     │           └── <commit-oid>/<contributor-uuid> → empty blob
     ├── comments/            → ledger of chains (keyed by thread UUID)
     │   └── <thread-uuid>/   → chain
-    │       └── <entry>/     → tree (not a flat blob; see §9.2)
-    │           ├── body     → blob (comment text)
+    │       └── <entry>/     → tree
+    │           ├── body     → blob
     │           ├── anchor   → blob: "<oid>[:<start>-<end>]"
-    │           ├── id       → blob: UUID v7 (stable comment identity across edits)
+    │           ├── id       → blob: UUID v7
     │           ├── resolved → blob: "true" (absent = unresolved)
     │           ├── reply-to → blob: parent comment UUID (absent = top-level)
     │           └── replaces → blob: prior comment UUID (absent = original)
@@ -457,7 +631,7 @@ refs/db/forge
     │       ├── handle       → blob
     │       ├── names/       → ledger
     │       ├── emails/      → ledger
-    │       ├── keys/        → ledger (GPG/SSH key fingerprints)
+    │       ├── keys/        → ledger
     │       └── roles/       → ledger
     ├── config/              → ledger
     │   └── providers/
@@ -468,101 +642,51 @@ refs/db/forge
         └── comments-by-object/     → object OID → space-separated thread UUIDs
 ```
 
-**GC note:** In the current forge implementation, reviews manually track referenced blob OIDs under an `objects/` subtree to prevent garbage collection.
-Under git-db this is unnecessary: any OID stored as a blob value in the transaction tree is reachable from `refs/db/forge` and therefore GC-safe.
-The `objects/` workaround must be removed when forge is migrated.
+**GC note:** Any OID stored as blob content in the transaction tree is reachable from `refs/db/forge` and GC-safe. forge's prior `objects/` workaround subtree is unnecessary under git-db and must be removed when forge is migrated.
+
+**Index maintenance:** All mutations to `issues/`, `reviews/`, and `comments/` update the corresponding `index/` entries in the same transaction.
+There is no deferred rebuild.
+After a merge, the merge dispatcher rebuilds `index/` from the merged primary data in a single tree walk.
 
 **Chain entry structure:** Comment chain entries are trees, not flat blobs.
-Each entry's tree contains the body blob and metadata blobs for anchor, identity, threading, and resolution.
-This is the general pattern: chain entries are `Value::tree()`, and git-db's `tx.append` must accept a tree value, not only a byte payload.
+Each entry's tree contains body and metadata blobs.
+`tx.append` accepts `Value::tree()`.
 
-### 9.2 Porcelain Operations (bash)
+### 11.2 Rust Type Definitions
 
-The forge porcelain storage layer in ~60 lines, built entirely on `git db`:
-
-```bash
-#!/bin/bash
-
-forge_issue_new() {
-    local title="$1" body="$2"
-    local oid=$(echo -n "$title" | git hash-object --stdin)
-    local txid=$(git db tx begin forge)
-    echo "$title" | git db tx put "$txid" "issues/$oid/title" --stdin
-    echo "open"   | git db tx put "$txid" "issues/$oid/state" --stdin
-    [ -n "$body" ] && echo "$body" | git db tx put "$txid" "issues/$oid/body" --stdin
-    git db tx commit "$txid" --message="open issue $oid"
-    echo "$oid"
+```rust
+#[derive(Facet, GitDbType)]
+#[db(path = "issues")]
+struct ForgeIssue {
+    title: String,
+    #[facet(merge = "lww")]
+    state: IssueState,
+    body: Option<String>,
+    #[facet(merge = "set")]
+    labels: LabelSet,
+    #[facet(merge = "set")]
+    assignees: ContributorSet,
 }
 
-forge_issue_close() {
-    local oid="$1"
-    local txid=$(git db tx begin forge)
-    echo "closed" | git db tx put "$txid" "issues/$oid/state" --stdin
-    git db tx commit "$txid" --message="close issue $oid"
-}
-
-forge_comment_new() {
-    local thread_uuid="$1" anchor="$2" body="$3" reply_to="$4"
-    local comment_uuid=$(uuidgen)
-    local object_oid="${anchor%%:*}"   # strip optional line range
-    local txid=$(git db tx begin forge)
-    # Entry is a tree of named blobs, not a flat blob.
-    git db tx append "$txid" "comments/$thread_uuid" \
-        --tree "body=$body" "anchor=$anchor" "id=$comment_uuid" \
-               ${reply_to:+"reply-to=$reply_to"}
-    # Maintain derived index inline (replaced by §7 incremental computation later).
-    local current=$(git db tx get "$txid" "index/comments-by-object/$object_oid" 2>/dev/null || true)
-    echo "${current:+$current }$thread_uuid" \
-        | git db tx put "$txid" "index/comments-by-object/$object_oid" --stdin
-    git db tx commit "$txid" --message="comment $comment_uuid on $object_oid"
-    echo "$comment_uuid"
-}
-
-forge_review_approve() {
-    local review_uuid="$1" commit_oid="$2" contributor_uuid="$3"
-    local txid=$(git db tx begin forge)
-    echo "" | git db tx put "$txid" \
-        "reviews/$review_uuid/approvals/$commit_oid/$contributor_uuid" --stdin
-    git db tx commit "$txid" --message="approve review $review_uuid at $commit_oid"
-}
-
-forge_issue_list() {
-    git db show forge issues/ | while read oid; do
-        local title=$(git db show forge "issues/$oid/title")
-        local state=$(git db show forge "issues/$oid/state")
-        local did=$(git db show forge "issues/$oid/display-id" 2>/dev/null || echo "$oid")
-        printf "%s\t%s\t%s\n" "$did" "$state" "$title"
-    done
-}
-
-forge_comments_for_object() {
-    local object_oid="$1"
-    local threads=$(git db show forge "index/comments-by-object/$object_oid")
-    for thread_uuid in $threads; do
-        git db tx log $(git db tx begin forge) "comments/$thread_uuid"
-    done
-}
-
-forge_sync() {
-    git push origin refs/db/forge
-    git fetch origin refs/db/forge:refs/db/forge
+#[derive(Facet, GitDbType)]
+#[db(path = "comments", primitive = "chain")]
+struct ForgeComment {
+    body: String,
+    anchor: String,
+    id: Uuid,
+    resolved: bool,
+    reply_to: Option<Uuid>,
+    replaces: Option<Uuid>,
 }
 ```
 
-This is the entire storage layer for a local-first issue and review tracker.
-Full transaction history, atomic mutations, offline support, and sync via standard git push/fetch.
-A developer building this never thinks about tree objects, ref CAS, or packfiles.
+The derive macro produces `serialize`, `deserialize`, `MARKER`, and `MergeStrategy` impls.
+No manual implementation required.
 
-## 10. Usage from Rust
-
-The same porcelain as a library.
-This is how forge's `Store` is implemented on top of git-db.
+### 11.3 Porcelain Operations (Rust)
 
 ```rust
-use git_db::{Db, Value};
-
 fn create_issue(db: &Db, title: &str, body: Option<&str>) -> Result<String> {
-    // Issue OID is the SHA1 of the title blob — deterministic, content-addressed.
     let oid = git_hash_blob(title.as_bytes());
     let mut tx = db.transaction()?;
     tx.put(&["issues", &oid, "title"], Value::from(title))?;
@@ -570,28 +694,21 @@ fn create_issue(db: &Db, title: &str, body: Option<&str>) -> Result<String> {
     if let Some(b) = body {
         tx.put(&["issues", &oid, "body"], Value::from(b))?;
     }
+    // Derived index maintained in same transaction.
     tx.commit(meta("open issue"))?;
     Ok(oid)
-}
-
-fn close_issue(db: &Db, oid: &str) -> Result<()> {
-    let mut tx = db.transaction()?;
-    tx.put(&["issues", oid, "state"], Value::from("closed"))?;
-    tx.commit(meta("close issue"))?;
-    Ok(())
 }
 
 fn add_comment(
     db: &Db,
     thread_uuid: &str,
-    anchor: &str,        // "<blob-oid>[:<start>-<end>]"
+    anchor: &str,
     body: &str,
     reply_to: Option<&str>,
 ) -> Result<String> {
     let comment_id = uuid::Uuid::now_v7().to_string();
-    let object_oid = anchor.split(':').next().unwrap(); // strip optional line range
+    let object_oid = anchor.split(':').next().unwrap();
 
-    // Chain entry is a structured tree, not a flat blob.
     let mut entry = Value::tree();
     entry.insert("body", Value::from(body));
     entry.insert("anchor", Value::from(anchor));
@@ -603,9 +720,7 @@ fn add_comment(
     let mut tx = db.transaction()?;
     tx.append(&["comments", thread_uuid], entry)?;
 
-    // Maintain derived index inline.
-    // Once §7 incremental computation is available, annotate index/ as `derived`
-    // and register a rebuild callback instead of doing this manually.
+    // Derived index: maintained inline, same transaction.
     let current = tx.get(&["index", "comments-by-object", object_oid])?
         .map(|v| v.to_string())
         .unwrap_or_default();
@@ -619,90 +734,11 @@ fn add_comment(
     tx.commit(meta("add comment"))?;
     Ok(comment_id)
 }
-
-fn approve_review(
-    db: &Db,
-    review_uuid: &str,
-    commit_oid: &str,
-    contributor_uuid: &str,
-) -> Result<()> {
-    let mut tx = db.transaction()?;
-    // Presence-as-membership: the key existing is the fact; value is empty.
-    tx.put(
-        &["reviews", review_uuid, "approvals", commit_oid, contributor_uuid],
-        Value::empty(),
-    )?;
-    tx.commit(meta("approve review"))?;
-    Ok(())
-}
-
-fn list_issues(db: &Db) -> Result<Vec<Issue>> {
-    let tx = db.transaction()?;
-    let oids = tx.list(&["issues"])?;
-    oids.iter().map(|oid| {
-        Ok(Issue {
-            oid: oid.clone(),
-            title: tx.get(&["issues", oid, "title"])?.unwrap().to_string(),
-            state: tx.get(&["issues", oid, "state"])?.unwrap().to_string(),
-            display_id: tx.get(&["issues", oid, "display-id"])?
-                .map(|v| v.to_string()),
-        })
-    }).collect()
-}
-
-fn comments_for_object(db: &Db, object_oid: &str) -> Result<Vec<Comment>> {
-    let tx = db.transaction()?;
-    let thread_list = tx.get(&["index", "comments-by-object", object_oid])?
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut comments = Vec::new();
-    for thread_uuid in thread_list.split_whitespace() {
-        for entry in tx.log(&["comments", thread_uuid])? {
-            // Each entry is a Value::tree(); access fields by name.
-            comments.push(Comment {
-                id: entry.get("id").unwrap().to_string(),
-                anchor: entry.get("anchor").unwrap().to_string(),
-                body: entry.get("body").unwrap().to_string(),
-                resolved: entry.get("resolved")
-                    .map(|v| v.to_string() == "true")
-                    .unwrap_or(false),
-                reply_to: entry.get("reply-to").map(|v| v.to_string()),
-                replaces: entry.get("replaces").map(|v| v.to_string()),
-            });
-        }
-    }
-    Ok(comments)
-}
 ```
 
-### Requirements surfaced by forge
+---
 
-These operations expose concrete requirements that drive git-db's API design:
-
-1. **Structured chain entries.**
-   `tx.append` must accept `Value::tree()`, not only a flat blob.
-   Forge comment entries carry body, anchor, stable ID, threading, and resolution state as separate named blobs within the entry tree.
-
-2. **Deep path put.**
-   `tx.put(&["reviews", uuid, "approvals", commit_oid, contributor_uuid], ...)` requires creating intermediate tree nodes on demand.
-   The transaction layer handles this; callers do not manage tree construction.
-
-3. **`Value::empty()`.**
-   Presence-as-membership (labels, assignees, approval entries) requires a valid empty blob value distinct from "key absent."
-
-4. **`Value::tree()` with named field access.**
-   `tx.log` returns an iterator of `Value`; for chain entries that are trees, callers must access fields by name (`entry.get("body")`).
-   The `Value` type must support both blob and tree variants with a uniform access API.
-
-5. **Automatic GC safety.**
-   Any OID stored as blob content in the transaction tree is reachable from `refs/db/forge` and protected from GC.
-   Forge's current manual `objects/` subtree (present in `reviews/<uuid>/objects/`) is unnecessary under git-db and must be removed when forge is migrated.
-
-6. **Derived index annotation.**
-   The `index/` subtree is annotated `derived`: excluded from merge, rebuildable from primary data. git-db's incremental computation (§7) should observe mutations to `issues/`, `reviews/`, and `comments/` and invoke registered rebuild callbacks.
-   Until §7 is implemented, callers maintain the index inline (as shown above).
-
-## 11. What git-db Replaces
+## 12. What git-db Replaces
 
 | Current approach | Problem | git-db equivalent |
 |---|---|---|
@@ -715,58 +751,65 @@ These operations expose concrete requirements that drive git-db's API design:
 | git-notes | Single-key-per-object, no nesting, poor merge | Ledger with arbitrary structure |
 | gitops state stores | Ad-hoc conventions, fragile CI scripts | Transaction-safe state with merge |
 
-## 12. What git-db Does Not Do
+---
 
-- **No query language.**
-  Reads are path lookups, not planned queries.
-  Build a query layer on top if you need one.
+## 13. What git-db Does Not Do
+
+- **No query language enforcement.**
+  The query layer (§9) is additive.
+  Reads are path lookups by default.
+  Build a query layer on top if needed.
 - **No schema enforcement.**
   Tree structure is by convention.
-  Build a schema validator on top if you need one.
+  Build a schema validator on top if needed.
 - **No working directory.**
   There is no checkout.
   The state tree exists only as git objects.
 - **No text diff/merge.**
-  The text porcelain (`git diff`, `git merge`) still handles source code. git-db handles structured data.
+  The text porcelain still handles source code. git-db handles structured data.
 - **No new protocols.**
   Sync is `git push` / `git fetch`.
   Auth is whatever your git remote uses.
 - **No hosted service.**
   git-db is plumbing.
-  Hosted services (forges, CI, etc.) are porcelain built on top.
+  Hosted services are porcelain built on top.
+- **No external database.**
+  No SQLite, no external process.
+  Everything is git objects and refs.
 
-## 13. Relationship to Existing Work
+---
+
+## 14. Relationship to Existing Work
 
 **git plumbing.**
-`git-db` is a strict superset of a subset of git plumbing.
-It composes `hash-object`, `mktree`, `write-tree`, `update-ref` into higher-level operations.
+`git-db` composes `hash-object`, `mktree`, `write-tree`, `update-ref` into higher-level operations.
 It does not replace or modify any existing git behavior.
 
 **Irmin.**
 Closest prior art.
 OCaml library for mergeable, branchable, content-addressed stores.
-`git-db` differs in being git-native (no custom format), Rust, CLI-accessible, and reduced to two primitives rather than Irmin's larger API surface.
+`git-db` differs in being git-native, Rust, CLI-accessible, and reduced to two primitives.
 
 **Noms / Dolt.**
 Content-addressed versioned databases with prolly trees and SQL.
-`git-db` operates at a lower layer — it provides the primitives that a system like Noms would implement, without prescribing a query interface or storage format.
+`git-db` operates at a lower layer — it provides primitives, without prescribing a query interface or storage format.
 
-**DeltaDB (Zed).**
-Operation-based version control with CRDTs for real-time collaboration.
-DeltaDB targets character-level edit tracking for collaborative coding.
-`git-db` targets general structured data.
-DeltaDB is a product; `git-db` is plumbing.
+**facet.**
+git-db uses facet for Rust type reflection.
+The `GitDbType` derive macro produces serialization, merge strategy selection, and type registry entries from the facet `SHAPE`.
+Shell consumers use the string registry written at `db init`.
 
 **jj.**
-Version control porcelain with operation log and conflict-as-data. jj could be implemented as a porcelain on `git-db` (operation log as a chain, change-id map as a ledger, branch pointers as ledger entries or real git refs).
-Whether the performance characteristics would be acceptable is an open question.
+jj could be implemented as a porcelain on `git-db` (operation log as a chain, change-id map as a ledger, branch pointers as ledger entries or real git refs).
+Whether performance characteristics would be acceptable is an open question.
 
 **Local-first / CRDTs.**
 `git-db`'s chain is a G-Set and its ledger with LWW per key is a conflict-free OR-Map.
 A local-first framework could use `git-db` as its persistence and sync layer.
-The community is fragmented across incompatible implementations; `git-db` offers a git-native option.
 
-## 14. Performance
+---
+
+## 15. Performance
 
 **Reads:** 4–5 object lookups per path (ref → commit → root tree → subtree → entry).
 Packfile memory-mapped.
@@ -776,18 +819,24 @@ Microseconds.
 A transaction touching M disjoint keys in a tree of depth D: M×D tree writes + 1 commit + 1 CAS.
 Typically under a kilobyte total.
 
+**Derived index writes:** zero overhead beyond the primary write.
+Index mutations are part of the same in-memory transaction buffer and committed in the same CAS.
+
 **Sync:** push/fetch of one ref.
 Bandwidth proportional to state delta, not total size.
 
 **Scaling:** hierarchical key sharding for ledgers exceeding ~10k entries.
-Optional SQLite read cache for workloads requiring indexed queries or prefix scans.
-Periodic flush mode with WAL for high-frequency mutation batching.
+For read-heavy workloads requiring fast prefix scans, maintain a process-local in-memory map keyed by subtree OID.
+Rebuild on OID change.
+No external database required.
 
 These are the performance characteristics of a small-to-medium structured data store.
 `git-db` is not competing with SQLite on throughput.
-It is competing with "ad-hoc YAML in a git repo" on correctness, and winning.
+It is competing with "ad-hoc YAML in a git repo" on correctness.
 
-## 15. Development Plan
+---
+
+## 16. Development Plan
 
 ### Phase 0: Core Library (3–4 weeks)
 
@@ -811,42 +860,45 @@ Shell-scriptable, unix-philosophy (stdin/stdout, exit codes).
 
 Merge dispatcher.
 Built-in chain and ledger strategies.
+`derived` ledger rebuild after merge.
 Conflict representation.
 Recursive merge.
 `git db merge`, `git db conflicts`, `git db resolve`.
 Property tests and fuzz testing.
 
-### Phase 4: forge as Reference Porcelain (2–3 weeks)
+### Phase 4: Facet Integration (2 weeks)
 
-**forge** is the primary example porcelain.
-Do not build a toy example — migrate forge itself. forge's full data model is specified in §9–10; those sections are the authoritative requirements for this phase.
+`GitDbType` derive macro.
+Serialization and deserialization from facet `SHAPE`.
+Merge strategy derivation from shape and `#[facet(merge = "...")]` attributes.
+Auto-population of `.db/type-registry` on `db init`.
 
-Deliverables:
+### Phase 5: forge as Reference Porcelain (2–3 weeks)
 
-- Rewrite `crates/git-forge/src/store.rs` and its entity modules (`issue.rs`, `review.rs`, `comment.rs`, `contributor.rs`) to use `git_db::Db` and `Tx` instead of direct `git2` + `git-ledger` + `git-chain` calls.
-- Remove `crates/git-forge/src/index.rs` manual rebuild logic; replace with inline index maintenance as shown in §10 (incremental computation from §7 is not required at this phase).
-- Remove the `objects/` GC workaround subtree from reviews; GC safety is automatic under git-db structural reachability.
-- All existing integration tests in `crates/git-forge/tests/` must pass unchanged.
+Migrate forge's storage layer (`store.rs`, `issue.rs`, `review.rs`, `comment.rs`, `contributor.rs`) to use `git_db::Db` and `Tx`.
+Remove `objects/` GC workaround.
+Remove manual index rebuild logic; replace with inline index maintenance.
+All existing integration tests in `crates/git-forge/tests/` must pass unchanged. forge MCP server operates correctly with no changes to its public tool API.
 
-Success criterion: the forge MCP server (`crates/forge-mcp`) operates correctly against the new storage layer with no changes to its public tool API.
+### Phase 6: Query Layer (2–3 weeks)
 
-### Phase 5: Incremental Computation (2–3 weeks)
+Path algebra evaluator.
+Wildcard traversal, blob predicate filtering, subpath projection.
+Index-aware query planner using `.db/annotations/`.
+`git db query` and `git db query --explain`.
+OID-keyed result caching.
 
-Dependency table.
-Demand-driven invalidation.
-SQLite read cache with incremental rebuild.
-
-### Phase 6: Documentation and Stabilization (1–2 weeks)
+### Phase 7: Documentation and Stabilization (1–2 weeks)
 
 Crate docs.
 Man pages for CLI commands.
 Tutorial: "Build a porcelain on git-db."
-Specification: tree layout, type markers, merge contracts.
+Specification: tree layout, type markers, merge contracts, query algebra.
 
 ---
 
-**Total estimated timeline: 13–20 weeks to 0.1 release.**
+**Total estimated timeline: 15–22 weeks to 0.1 release.**
 
 Critical path is Phase 3 (merge).
-Minimum viable release (no merge, no incremental computation): Phases 0–2, approximately 6–8 weeks.
-This is enough for single-writer porcelains that sync via push/fetch and don't need concurrent offline edits.
+Minimum viable release (no facet integration, no query layer): Phases 0–3, approximately 6–8 weeks.
+Sufficient for single-writer porcelains that sync via push/fetch without concurrent offline edits.
