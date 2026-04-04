@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "crates/git-metadata",
     "crates/git-ledger",
-    "crates/git-chain",
+    "crates/git-chain", "crates/git-db",
 ]
 
 [workspace.package]

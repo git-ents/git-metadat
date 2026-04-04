@@ -216,6 +216,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-db"
+version = "0.1.0"
+dependencies = [
+ "git-chain",
+ "git-ledger",
+ "git-metadata",
+ "git2",
+]
+
+[[package]]
 name = "git-filter-tree"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
