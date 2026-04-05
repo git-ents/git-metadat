@@ -3,6 +3,9 @@
 // We can remove this when the crate is fully written.
 #![allow(unused)]
 
+#[cfg(test)]
+mod tests;
+
 use std::hash::Hash;
 
 /// Plumbing functionality for non-text object storage.
