@@ -35,7 +35,7 @@ Everything is git objects and refs.
 
 A database created by `git-store` coexists in the same `.git` as source code.
 Source lives in `refs/heads/`.
-Structured data lives in `refs/db/<n>`.
+Structured data lives under `refs/db/` — one ref per entity.
 They share the ODB, packfiles, and transport.
 `git push` pushes both.
 `git clone` fetches both.
@@ -86,7 +86,7 @@ pub trait Ref {
 
 A `Ref` is a named, read-only pointer into a `ContentAddressable` store.
 
-The git implementation: `Ref` = git ref under `refs/db/<n>`.
+The git implementation: `Ref` = a git ref, e.g. `refs/db/forge/issue/1`.
 
 ### 2.3 Transaction
 
@@ -196,14 +196,14 @@ Other data structure types are not new primitives — they are chains or ledgers
 |---|---|
 | Derived index | Ledger + `derived` (maintained inline by writers; rebuilt after merge from primary data) |
 | Immutable store | Ledger + `write-once` (key = content hash, no overwrite) |
-| Local state | Chain or Ledger + `local-only` (excluded from push/fetch; lives under `refs/db-local/<n>`) |
+| Local state | Chain or Ledger + `local-only` (excluded from push/fetch; lives under `refs/db-local/`) |
 | Conflict record | Ledger with keys `base`, `left`, `right` + `.db-type` = `conflict` |
 
 `derived` indexes are not lazily invalidated and recomputed.
 Writers maintain them atomically in the same transaction as the primary write.
 The `derived` annotation exists to tell the merge dispatcher to rebuild the index from primary data after a merge rather than attempting to merge the index directly.
 
-`local-only` ledgers and chains are stored under a separate local ref (`refs/db-local/<n>`) that is never advertised during `upload-pack`.
+`local-only` entities are stored under `refs/db-local/` and never advertised during `upload-pack`.
 They use the same transaction machinery as shared data.
 
 ### 3.4 Recursive Composition
@@ -284,18 +284,18 @@ Shell porcelains that never call `db merge` do not need the registry at all.
 ## 5. Transaction
 
 ```rust
-pub struct Db { /* gix::Repository + ref name */ }
+pub struct Db { /* gix::Repository + ref namespace prefix */ }
 
 impl Db {
-    pub fn open(repo: &gix::Repository, name: &str) -> Result<Self>;
-    pub fn init(repo: &gix::Repository, name: &str) -> Result<Self>;
+    pub fn open(repo: &gix::Repository, prefix: &str) -> Result<Self>;
+    pub fn init(repo: &gix::Repository, prefix: &str) -> Result<Self>;
     pub fn transaction(&self) -> Result<Tx>;
 }
 
-pub struct Tx { /* snapshot oid, in-memory mutation buffer */ }
+pub struct Tx { /* per-ref snapshots, in-memory mutation buffers */ }
 
 impl Tx {
-    // Ledger operations
+    // Ledger operations — path includes the entity ref
     pub fn get(&self, path: &[&str]) -> Result<Option<Value>>;
     pub fn put(&mut self, path: &[&str], value: Value) -> Result<()>;
     pub fn delete(&mut self, path: &[&str]) -> Result<()>;
@@ -305,88 +305,96 @@ impl Tx {
     pub fn append(&mut self, path: &[&str], entry: Value) -> Result<()>;
     pub fn log(&self, path: &[&str]) -> Result<Log>;
 
-    // Commit — stages a single ref update and commits the transaction
-    pub fn commit(self, meta: CommitMeta) -> Result<Oid, TransactionError>;
+    // Commit — atomically updates all touched refs
+    pub fn commit(self, meta: CommitMeta) -> Result<(), TransactionError>;
 }
 ```
 
 Protocol:
 
 1. **Begin.**
-   Read ref → commit → root tree.
-   Snapshot in memory.
+   Read each touched ref → commit → root tree.
+   Snapshot per ref.
 2. **Read.**
-   Path traversal through content-addressed trees. 4–5 object reads per lookup.
+   Path prefix selects the ref; remaining path traverses the entity's tree.
 3. **Write.**
-   Mutations accumulate in memory.
+   Mutations accumulate in memory, grouped by ref.
    No I/O until commit.
 4. **Commit.**
-   Write new tree objects bottom-up (only modified paths).
-   Write commit (parent = old head).
-   Stage and commit a one-entry `Transaction` on the database ref.
+   For each modified ref: write new tree objects bottom-up, write commit (parent = old head).
+   Stage all ref updates into a single `Transaction` and commit atomically.
    On failure, retry from step 1.
 
-One ref per database.
-One `Transaction` per commit — may span multiple refs for cross-database atomicity.
+One ref per entity.
+One `Transaction` per commit — may touch one ref or many.
 Arbitrarily many mutations per transaction.
 Structural sharing: unchanged subtrees referenced by existing OID.
 
 **Writers maintain derived indexes in the same transaction as primary writes.**
 There is no separate invalidation pass.
-A transaction that creates an issue also updates `index/issues-by-display-id/`.
+A transaction that creates an issue also updates the `index/` refs.
 Atomicity is free — it is already a single `Transaction`.
 
 ---
 
-## 6. State Tree Layout
+## 6. Ref Layout
+
+Each entity is its own ref.
+The ref path encodes the namespace and identity.
+Each ref points to a commit chain for that entity.
 
 ```text
-refs/db/<n>  →  commit (transaction N)
-                     └── tree (root state)
-                         ├── .db-type             → blob: "db-root"
-                         ├── .db/                  → self-hosted metadata
-                         │   ├── .db-type          → blob: "ledger"
-                         │   ├── schema-version    → blob: "0.1"
-                         │   ├── type-registry/    → ledger: type marker → merge strategy name
-                         │   └── annotations/      → ledger: path → policy
-                         ├── <user-defined>/
-                         │   ├── .db-type          → blob: "ledger" | "chain"
-                         │   └── ...
-                         └── ...
+refs/db/<namespace>/<type>/<id>  →  commit (latest state)
+                                       └── tree (entity state)
+                                           ├── .db-type   → blob: type marker
+                                           └── ...        → entity fields
 
-refs/db-local/<n>  →  commit (local-only state)
-                           └── tree
-                               └── <user-defined local data>/
+refs/db/<namespace>/.db          →  commit (database metadata)
+                                       └── tree
+                                           ├── schema-version    → blob: "0.1"
+                                           ├── type-registry/    → ledger: type marker → merge strategy name
+                                           └── annotations/      → ledger: ref pattern → policy
+
+refs/db-local/<namespace>/...    →  (same conventions, never advertised via upload-pack)
 ```
 
-The `.db/` subtree is a ledger like any other — self-hosted, versioned, auditable.
+Example refs for a forge database:
+
+```text
+refs/db/forge/issue/abc123
+refs/db/forge/issue/def456
+refs/db/forge/review/01926b7e-...
+refs/db/forge/comment/01926b80-...
+refs/db/forge/contributor/01926b81-...
+refs/db/forge/index/issues-by-display-id
+refs/db/forge/.db
+```
+
+The `.db` ref is a ledger like any other — self-hosted, versioned, auditable.
 The first transaction on `db init` writes it, populated from registered `GitDbType` implementations.
 No external config files.
 
-`refs/db-local/<n>` follows the same tree conventions but is never advertised during `upload-pack`.
-Local-only chains and ledgers live here.
+Listing entities of a type is a ref prefix scan (`refs/db/forge/issue/`).
+History for a single entity is the commit log of its ref.
 
-Nested chains use embedded representation: entries are subtrees within the parent, named by sequence number.
-History is recovered from the enclosing transaction chain.
-This preserves git reachability for GC and clone.
+Chains use commit ancestry: each `append` writes a new commit whose parent is the previous head.
+Chain entries are recovered by walking the commit log of the entity's ref.
 
 ---
 
 ## 7. Derived Indexes
 
-Derived indexes are ledgers maintained atomically by writers, not lazily recomputed by readers.
+Derived indexes are refs maintained atomically by writers, not lazily recomputed by readers.
 
-**Rule:** any transaction that mutates primary data must also update all `derived` ledgers that index that data, in the same `Tx`.
-The `commit()` call is a single CAS covering both.
+**Rule:** any transaction that mutates primary data must also update all `derived` index refs in the same `Tx`.
+The `commit()` call is a single `Transaction` covering both the entity ref and the index ref.
 
-**On merge:** the merge dispatcher skips `derived` ledgers (per their policy annotation) and instead rebuilds them from the merged primary data.
-This is a single tree walk over the merged state, not a dependency graph traversal.
+**On merge:** the merge dispatcher skips `derived` refs (per their policy annotation) and instead rebuilds them from the merged primary data.
 
-**OID-based cache validity:** the subtree OID is the revision identifier for any subtree.
-A process-local in-memory cache may store `(input_subtree_oid → derived_value)`.
+**OID-based cache validity:** the commit OID of an index ref is the revision identifier.
+A process-local in-memory cache may store `(index_commit_oid → derived_value)`.
 Cache validity is a hash comparison.
 No framework required.
-If the OID of `issues/` matches the last-seen OID, the cached issue list is valid.
 
 This pattern — writer-maintained indexes, OID-keyed process cache — covers the practical needs of porcelains like forge without external dependencies.
 
@@ -396,7 +404,7 @@ This pattern — writer-maintained indexes, OID-keyed process cache — covers t
 
 ```rust
 pub fn merge(
-    db: &Db,
+    r: &impl Ref,
     left: Oid,
     right: Oid,
     strategies: &StrategyMap,
@@ -417,7 +425,8 @@ pub enum MergeResult {
 }
 ```
 
-Dispatcher walks base, left, right trees in parallel.
+Merge operates per entity ref.
+The dispatcher walks base, left, right trees of the entity in parallel.
 At each node:
 
 1. Same OID in left and right → keep.
@@ -499,45 +508,50 @@ Porcelains that need joins should maintain join-supporting indexes at write time
 ### 10.1 Database Lifecycle
 
 ```text
-git db init <n>
-    Create a new database. Writes .db/ metadata subtree, creates refs/db/<n>.
+git db init <namespace>
+    Create a new database namespace. Writes .db metadata ref, creates
+    refs/db/<namespace>/.db.
     Registers GitDbType implementations if called from a Rust binary; otherwise
     writes an empty type registry.
 
-git db list
-    List all databases in the repository (enumerate refs/db/*).
+git db list [<namespace>]
+    Without namespace: list all database namespaces (enumerate refs/db/*).
+    With namespace: list all entity refs under that namespace.
 
-git db drop <n>
-    Delete a database (remove refs/db/<n>, objects GC'd normally).
+git db drop <namespace>
+    Delete a database (remove all refs under refs/db/<namespace>/, objects
+    GC'd normally).
 ```
 
 ### 10.2 Transaction Commands
 
 ```text
-git db tx begin <n>
+git db tx begin <namespace>
     Start a transaction. Prints a transaction ID (the snapshot OID).
     Writes transaction state to .git/db-tx/<txid>.
 
-git db tx get <txid> <path>
-    Read a value. Prints blob content to stdout.
+git db tx get <txid> <ref-path> [<tree-path>]
+    Read a value. ref-path selects the entity ref; tree-path traverses within it.
+    Prints blob content to stdout.
 
-git db tx put <txid> <path> [--stdin | --file=<f> | <literal>]
-    Stage a write.
+git db tx put <txid> <ref-path> <tree-path> [--stdin | --file=<f> | <literal>]
+    Stage a write to an entity ref.
 
-git db tx delete <txid> <path>
-    Stage a deletion.
+git db tx delete <txid> <ref-path> [<tree-path>]
+    Stage a deletion. Without tree-path, deletes the entire entity ref.
 
-git db tx append <txid> <path> [--stdin | --file=<f> | --tree <k=v>...]
+git db tx append <txid> <ref-path> [--stdin | --file=<f> | --tree <k=v>...]
     Stage a chain append. --tree accepts named blob pairs for structured entries.
 
-git db tx log <txid> <path>
+git db tx log <txid> <ref-path>
     Print chain entries to stdout.
 
-git db tx list <txid> <path>
-    List keys in a ledger.
+git db tx list <txid> <ref-prefix>
+    List entity refs under a prefix, or keys within an entity's tree.
 
 git db tx commit <txid> [--message=<msg>] [--author=<a>]
-    Commit the transaction. Atomic CAS. Exits 0 on success, 1 on contention.
+    Commit the transaction. Atomic ref transaction. Exits 0 on success,
+    1 on contention.
 
 git db tx abort <txid>
     Discard staged mutations.
@@ -548,57 +562,58 @@ Transaction state files in `.git/db-tx/` are local, ephemeral, and deleted on co
 ### 10.3 History and Inspection
 
 ```text
-git db log <n> [-n <count>]
-    Print transaction history (commit log of refs/db/<n>).
+git db log <ref-path> [-n <count>]
+    Print commit history of an entity ref.
 
-git db show <n> [<path>]
-    Print current state at path. Without path, prints root tree.
+git db show <ref-path> [<tree-path>]
+    Print current state. Without tree-path, prints root tree of the entity.
 
-git db diff <n> <oid-a> <oid-b> [<path>]
+git db diff <ref-path> <oid-a> <oid-b> [<tree-path>]
     Diff two states. Output is path-level: added/modified/deleted keys.
 
-git db cat <n> <oid>
+git db cat <namespace> <oid>
     Print raw content of an object by OID.
 ```
 
 ### 10.4 Merge
 
 ```text
-git db merge <n> <left-oid> <right-oid> [--strategy=<s>]
-    Three-way merge. Derived ledgers rebuilt from merged primary data.
-    Prints result OID and conflict summary.
+git db merge <ref-path> <left-oid> <right-oid> [--strategy=<s>]
+    Three-way merge of an entity ref. Derived index refs rebuilt from merged
+    primary data. Prints result OID and conflict summary.
 
-git db conflicts <n> <oid>
+git db conflicts <ref-path> <oid>
     List unresolved conflicts in a merge result.
 
-git db resolve <n> <oid> <path> [--take=left|right|base] [--value=<v>]
+git db resolve <ref-path> <oid> <tree-path> [--take=left|right|base] [--value=<v>]
     Resolve a single conflict. Produces a new state OID.
 ```
 
 ### 10.5 Query
 
 ```text
-git db query <n> <path-pattern> [--where <path>=<value>] [--select <path>]
-    Path algebra query. Enumerates matching entries, applies predicates,
-    projects selected subpaths. Uses index rewriting if applicable.
+git db query <namespace> <ref-pattern> [--where <tree-path>=<value>] [--select <tree-path>]
+    Query across entity refs. Enumerates matching refs, applies predicates
+    on entity tree contents, projects selected subpaths. Uses index refs
+    if applicable.
 
-git db query <n> --explain <path-pattern> [--where <path>=<value>]
-    Show query plan: which paths are scanned, which indexes are used.
+git db query <namespace> --explain <ref-pattern> [--where <tree-path>=<value>]
+    Show query plan: which refs are scanned, which index refs are used.
 ```
 
 ### 10.6 Schema and Types
 
 ```text
-git db type register <n> <type-name> [--merge-strategy=<s>]
+git db type register <namespace> <type-name> [--merge-strategy=<s>]
     Register a type marker and its merge strategy in .db/type-registry.
     Normally written automatically by GitDbType::init(); use manually for
     shell-only porcelains.
 
-git db type list <n>
+git db type list <namespace>
     List registered types and strategies.
 
-git db annotate <n> <path> <annotation>
-    Set a policy annotation (derived, write-once, local-only) on a path.
+git db annotate <namespace> <ref-pattern> <annotation>
+    Set a policy annotation (derived, write-once, local-only) on a ref pattern.
 ```
 
 ---
@@ -608,64 +623,75 @@ git db annotate <n> <path> <annotation>
 forge is a local-first issue and code-review tracker stored entirely in git.
 It is the primary reference porcelain for git-store and drives all API design decisions.
 
-### 11.1 State Tree Layout
+### 11.1 Ref Layout
 
-forge uses a single database (`refs/db/forge`) with four top-level namespaces:
+forge uses the `refs/db/forge/` namespace with one ref per entity:
 
 ```text
-refs/db/forge
-└── tree
-    ├── issues/              → ledger (keyed by content-hash OID of the title blob)
-    │   └── <oid>/
-    │       ├── title        → blob
-    │       ├── state        → blob: "open" | "closed"
-    │       ├── body         → blob (optional)
-    │       ├── display-id   → blob: e.g. "GH#42" (set by sync adapter)
-    │       ├── labels/      → ledger (name → empty blob; presence = set membership)
-    │       └── assignees/   → ledger (contributor UUID → empty blob)
-    ├── reviews/             → ledger (keyed by UUID v7)
-    │   └── <uuid>/
-    │       ├── title        → blob
-    │       ├── state        → blob: "open" | "draft" | "closed" | "merged"
-    │       ├── body         → blob (optional)
-    │       ├── target/
-    │       │   ├── head     → blob: commit OID
-    │       │   ├── base     → blob: commit OID
-    │       │   └── path     → blob: file path (absent = whole-tree review)
-    │       ├── labels/      → ledger
-    │       ├── assignees/   → ledger
-    │       └── approvals/   → ledger
-    │           └── <commit-oid>/<contributor-uuid> → empty blob
-    ├── comments/            → ledger of chains (keyed by thread UUID)
-    │   └── <thread-uuid>/   → chain
-    │       └── <entry>/     → tree
-    │           ├── body     → blob
-    │           ├── anchor   → blob: "<oid>[:<start>-<end>]"
-    │           ├── id       → blob: UUID v7
-    │           ├── resolved → blob: "true" (absent = unresolved)
-    │           ├── reply-to → blob: parent comment UUID (absent = top-level)
-    │           └── replaces → blob: prior comment UUID (absent = original)
-    ├── contributors/        → ledger (keyed by UUID v7)
-    │   └── <uuid>/
-    │       ├── handle       → blob
-    │       ├── names/       → ledger
-    │       ├── emails/      → ledger
-    │       ├── keys/        → ledger
-    │       └── roles/       → ledger
-    ├── config/              → ledger
-    │   └── providers/
-    │       └── github/      → provider-specific config blobs
-    └── index/               → derived ledger (annotation: derived)
-        ├── issues-by-display-id/   → display-id string → issue OID
-        ├── reviews-by-display-id/  → display-id string → review UUID
-        └── comments-by-object/     → object OID → space-separated thread UUIDs
+refs/db/forge/issue/<oid>          → commit chain for one issue
+                                       └── tree
+                                           ├── .db-type     → blob: "issue"
+                                           ├── title        → blob
+                                           ├── state        → blob: "open" | "closed"
+                                           ├── body         → blob (optional)
+                                           ├── display-id   → blob: e.g. "GH#42" (set by sync adapter)
+                                           ├── labels/      → ledger (name → empty blob; presence = set membership)
+                                           └── assignees/   → ledger (contributor UUID → empty blob)
+
+refs/db/forge/review/<uuid>        → commit chain for one review
+                                       └── tree
+                                           ├── .db-type     → blob: "review"
+                                           ├── title        → blob
+                                           ├── state        → blob: "open" | "draft" | "closed" | "merged"
+                                           ├── body         → blob (optional)
+                                           ├── target/
+                                           │   ├── head     → blob: commit OID
+                                           │   ├── base     → blob: commit OID
+                                           │   └── path     → blob: file path (absent = whole-tree review)
+                                           ├── labels/      → ledger
+                                           ├── assignees/   → ledger
+                                           └── approvals/   → ledger
+                                               └── <commit-oid>/<contributor-uuid> → empty blob
+
+refs/db/forge/comment/<thread-uuid> → commit chain (one commit per comment)
+                                        └── tree (latest entry)
+                                            ├── .db-type   → blob: "comment"
+                                            ├── body       → blob
+                                            ├── anchor     → blob: "<oid>[:<start>-<end>]"
+                                            ├── id         → blob: UUID v7
+                                            ├── resolved   → blob: "true" (absent = unresolved)
+                                            ├── reply-to   → blob: parent comment UUID (absent = top-level)
+                                            └── replaces   → blob: prior comment UUID (absent = original)
+
+refs/db/forge/contributor/<uuid>    → commit chain for one contributor
+                                        └── tree
+                                            ├── handle     → blob
+                                            ├── names/     → ledger
+                                            ├── emails/    → ledger
+                                            ├── keys/      → ledger
+                                            └── roles/     → ledger
+
+refs/db/forge/config                → commit chain for config
+                                        └── tree
+                                            └── providers/
+                                                └── github/ → provider-specific config blobs
+
+refs/db/forge/index/issues-by-display-id   → commit (derived)
+                                               └── tree: display-id string → issue OID
+refs/db/forge/index/reviews-by-display-id  → commit (derived)
+                                               └── tree: display-id string → review UUID
+refs/db/forge/index/comments-by-object     → commit (derived)
+                                               └── tree: object OID → space-separated thread UUIDs
+
+refs/db/forge/.db                   → database metadata
 ```
 
-**GC note:** Any OID stored as blob content in the transaction tree is reachable from `refs/db/forge` and GC-safe. forge's prior `objects/` workaround subtree is unnecessary under git-store and must be removed when forge is migrated.
+**GC note:** Every entity ref is a GC root.
+Any OID stored as blob content within an entity's tree is reachable. forge's prior `objects/` workaround subtree is unnecessary under git-store and must be removed when forge is migrated.
 
-**Index maintenance:** All mutations to `issues/`, `reviews/`, and `comments/` update the corresponding `index/` entries in the same transaction.
+**Index maintenance:** All mutations to entity refs update the corresponding `index/` refs in the same `Transaction`.
 There is no deferred rebuild.
-After a merge, the merge dispatcher rebuilds `index/` from the merged primary data in a single tree walk.
+After a merge, the merge dispatcher rebuilds `index/` refs from the merged primary data.
 
 **Chain entry structure:** Comment chain entries are trees, not flat blobs.
 Each entry's tree contains body and metadata blobs.
@@ -675,7 +701,7 @@ Each entry's tree contains body and metadata blobs.
 
 ```rust
 #[derive(Facet, GitDbType)]
-#[db(path = "issues")]
+#[db(ref_prefix = "issue")]
 struct ForgeIssue {
     title: String,
     #[facet(merge = "lww")]
@@ -688,7 +714,7 @@ struct ForgeIssue {
 }
 
 #[derive(Facet, GitDbType)]
-#[db(path = "comments", primitive = "chain")]
+#[db(ref_prefix = "comment", primitive = "chain")]
 struct ForgeComment {
     body: String,
     anchor: String,
@@ -708,12 +734,13 @@ No manual implementation required.
 fn create_issue(db: &Db, title: &str, body: Option<&str>) -> Result<String> {
     let oid = git_hash_blob(title.as_bytes());
     let mut tx = db.transaction()?;
-    tx.put(&["issues", &oid, "title"], Value::from(title))?;
-    tx.put(&["issues", &oid, "state"], Value::from("open"))?;
+    // Entity ref: refs/db/forge/issue/<oid>
+    tx.put(&["issue", &oid, "title"], Value::from(title))?;
+    tx.put(&["issue", &oid, "state"], Value::from("open"))?;
     if let Some(b) = body {
-        tx.put(&["issues", &oid, "body"], Value::from(b))?;
+        tx.put(&["issue", &oid, "body"], Value::from(b))?;
     }
-    // Derived index maintained in same transaction.
+    // Derived index ref updated in same atomic transaction.
     tx.commit(meta("open issue"))?;
     Ok(oid)
 }
@@ -737,9 +764,10 @@ fn add_comment(
     }
 
     let mut tx = db.transaction()?;
-    tx.append(&["comments", thread_uuid], entry)?;
+    // Entity ref: refs/db/forge/comment/<thread-uuid>
+    tx.append(&["comment", thread_uuid], entry)?;
 
-    // Derived index: maintained inline, same transaction.
+    // Derived index ref: updated in same atomic transaction.
     let current = tx.get(&["index", "comments-by-object", object_oid])?
         .map(|v| v.to_string())
         .unwrap_or_default();
@@ -830,19 +858,20 @@ A local-first framework could use `git-store` as its persistence and sync layer.
 
 ## 15. Performance
 
-**Reads:** 4–5 object lookups per path (ref → commit → root tree → subtree → entry).
+**Reads:** 3–4 object lookups per path (ref → commit → tree → entry).
 Packfile memory-mapped.
 Microseconds.
 
-**Writes:** one tree object per modified subtree level + one commit + one CAS.
-A transaction touching M disjoint keys in a tree of depth D: M×D tree writes + 1 commit + 1 CAS.
-Typically under a kilobyte total.
+**Writes:** one tree object per modified subtree level + one commit per touched ref.
+A transaction touching N entity refs with M total mutations: M tree writes + N commits + one atomic ref transaction.
+Typically under a kilobyte total per entity.
 
 **Derived index writes:** zero overhead beyond the primary write.
-Index mutations are part of the same in-memory transaction buffer and committed in the same CAS.
+Index mutations are part of the same in-memory transaction buffer and committed in the same atomic ref transaction.
 
-**Sync:** push/fetch of one ref.
+**Sync:** push/fetch of refs under the namespace prefix.
 Bandwidth proportional to state delta, not total size.
+Ref advertisement scales with entity count; ref-prefix filtering limits overhead.
 
 **Scaling:** hierarchical key sharding for ledgers exceeding ~10k entries.
 For read-heavy workloads requiring fast prefix scans, maintain a process-local in-memory map keyed by subtree OID.
@@ -859,7 +888,7 @@ It is competing with "ad-hoc YAML in a git repo" on correctness.
 
 ### Phase 0: Core Library (3–4 weeks)
 
-`ContentAddressable` and `Pointer` implementations on gix.
+`ContentAddressable`, `Ref`, and `Transaction` implementations on gix.
 `Tx` struct with get/put/delete/append/log/list/commit.
 Single integration test: create a database, run a transaction, verify round-trip.
 Property tests for foundation trait laws.
