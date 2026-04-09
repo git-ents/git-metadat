@@ -45,35 +45,51 @@ pub(crate) trait ContentAddressable {
     fn contains(&self, hash: &Self::Hash) -> Result<bool, Self::Error>;
 }
 
-/// A reference to a value in a `ContentAddressable` store.
-pub(crate) trait Pointer {
+/// A named pointer into a [`ContentAddressable`] store. Read-only.
+pub(crate) trait Ref {
     /// The hash type used to identify stored values.
     type Hash: Eq + Clone;
-    /// The error type returned by operations on this pointer.
+    /// The error type returned by operations on this ref.
     type Error;
 
-    /// Read the current hash this pointer refers to.
+    /// Read the current hash this ref points to.
     ///
     /// # Errors
     ///
-    /// Returns an error if the pointer cannot be read.
+    /// Returns an error if the ref cannot be read.
     fn read(&self) -> Result<Option<Self::Hash>, Self::Error>;
+}
 
-    /// Atomically update this pointer from `expected` to `new`.
-    ///
-    /// | `expected` | `new`    | meaning |
-    /// |------------|----------|---------|
-    /// | `None`     | `Some(h)` | create |
-    /// | `Some(old)` | `Some(new)` | update |
-    /// | `Some(old)` | `None`  | delete |
-    ///
-    /// If both `expected` and `new` are `None`, the operation is a no-op.
+/// A batch of guarded ref updates, committed atomically.
+///
+/// Stage one or more `(ref, expected, new)` updates, then call [`commit`](Transaction::commit)
+/// to apply them all-or-nothing. A single-ref compare-and-swap is a one-entry transaction.
+///
+/// | `expected` | `new`      | meaning |
+/// |------------|------------|---------|
+/// | `None`     | `Some(h)`  | create  |
+/// | `Some(old)`| `Some(new)`| update  |
+/// | `Some(old)`| `None`     | delete  |
+pub(crate) trait Transaction {
+    /// The ref type this transaction operates on.
+    type Ref: Ref;
+    /// The error type returned by commit.
+    type Error;
+
+    /// Stage a guarded update for the given ref.
+    fn stage(
+        &mut self,
+        pointer: &Self::Ref,
+        expected: Option<<Self::Ref as Ref>::Hash>,
+        new: Option<<Self::Ref as Ref>::Hash>,
+    );
+
+    /// Atomically commit all staged updates.
     ///
     /// # Errors
     ///
-    /// Returns an error if the compare-and-swap fails or the pointer cannot be updated.
-    fn cas(&self, expected: Option<Self::Hash>, new: Option<Self::Hash>)
-    -> Result<(), Self::Error>;
+    /// Returns an error if any guard fails or the updates cannot be applied.
+    fn commit(self) -> Result<(), Self::Error>;
 }
 
 /// A branch of entry objects with support for multiple parents.

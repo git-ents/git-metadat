@@ -45,7 +45,7 @@ If they reference the same blobs, deduplication is automatic.
 
 ## 2. Foundation Traits
 
-Two traits define the storage contract.
+Three traits define the storage contract.
 All higher-level operations are expressed in terms of these.
 
 ### 2.1 ContentAddressable
@@ -74,35 +74,54 @@ The git implementation: `Hash` = `gix::ObjectId`.
 `retrieve` = `find_object()`.
 The laws are guaranteed by the git specification.
 
-### 2.2 Pointer
+### 2.2 Ref
 
 ```rust
-pub trait Pointer {
+pub trait Ref {
     type Hash: Eq + Clone;
 
     fn read(&self) -> Result<Option<Self::Hash>>;
-    fn cas(
-        &self,
-        expected: Option<Self::Hash>,
-        new: Option<Self::Hash>,
-    ) -> Result<(), CasFailure>;
 }
 ```
+
+A `Ref` is a named, read-only pointer into a `ContentAddressable` store.
+
+The git implementation: `Ref` = git ref under `refs/db/<n>`.
+
+### 2.3 Transaction
+
+```rust
+pub trait Transaction {
+    type Ref: Ref;
+
+    fn stage(
+        &mut self,
+        pointer: &Self::Ref,
+        expected: Option<<Self::Ref as Ref>::Hash>,
+        new: Option<<Self::Ref as Ref>::Hash>,
+    );
+
+    fn commit(self) -> Result<(), TransactionError>;
+}
+```
+
+A `Transaction` is a batch of guarded ref updates, committed atomically.
+A single-ref compare-and-swap is a one-entry transaction — there is no separate CAS primitive.
 
 **Laws:**
 
 1. **Atomicity.**
-   A CAS either fully succeeds or fully fails.
+   `commit` either applies every staged update or none.
 2. **Linearizability.**
-   Concurrent CAS operations are totally ordered.
+   Concurrent transactions are totally ordered.
 3. **Consistency.**
-   After a successful `cas(old, new)`, `read()` returns `new` absent further writes.
+   After a successful `commit` that staged `(r, old, new)`, `r.read()` returns `new` absent further writes.
 
-The git implementation: `Pointer` = git ref under `refs/db/<n>`.
-CAS via gix ref transaction (lockfile, verify, update, rename).
+The git implementation: `gix::refs::transaction::Transaction`.
+Lockfile-based for loose refs, atomic packed-refs rewrite for packed refs.
 Fallback to `git update-ref --stdin` for reftable or other backends gix doesn't yet support.
 
-### 2.3 Closure Property
+### 2.4 Closure Property
 
 Any `ContentAddressable` store can store the complete serialized state of any other `ContentAddressable` store as a single value.
 This is structural — it falls out of `Value` being general enough to contain arbitrary bytes.
@@ -286,15 +305,15 @@ impl Tx {
     pub fn append(&mut self, path: &[&str], entry: Value) -> Result<()>;
     pub fn log(&self, path: &[&str]) -> Result<Log>;
 
-    // Commit — single ref CAS, atomic
-    pub fn commit(self, meta: CommitMeta) -> Result<Oid, CasFailure>;
+    // Commit — stages a single ref update and commits the transaction
+    pub fn commit(self, meta: CommitMeta) -> Result<Oid, TransactionError>;
 }
 ```
 
 Protocol:
 
 1. **Begin.**
-   Read pointer → commit → root tree.
+   Read ref → commit → root tree.
    Snapshot in memory.
 2. **Read.**
    Path traversal through content-addressed trees. 4–5 object reads per lookup.
@@ -304,18 +323,18 @@ Protocol:
 4. **Commit.**
    Write new tree objects bottom-up (only modified paths).
    Write commit (parent = old head).
-   CAS the pointer.
+   Stage and commit a one-entry `Transaction` on the database ref.
    On failure, retry from step 1.
 
-Single pointer per database.
-One CAS per transaction.
+One ref per database.
+One `Transaction` per commit — may span multiple refs for cross-database atomicity.
 Arbitrarily many mutations per transaction.
 Structural sharing: unchanged subtrees referenced by existing OID.
 
 **Writers maintain derived indexes in the same transaction as primary writes.**
 There is no separate invalidation pass.
 A transaction that creates an issue also updates `index/issues-by-display-id/`.
-Atomicity is free — it is already a single CAS.
+Atomicity is free — it is already a single `Transaction`.
 
 ---
 
