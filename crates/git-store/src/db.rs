@@ -27,6 +27,9 @@ pub enum Error {
     /// All retry attempts were exhausted due to concurrent modifications.
     #[error("concurrent modification: max retries ({0}) exceeded")]
     Conflict(usize),
+    /// The path has no components.
+    #[error("path must have at least one component")]
+    EmptyPath,
     /// A path component is invalid.
     #[error("invalid path component {0:?}: must be non-empty and not contain '/' or null bytes")]
     InvalidComponent(String),
@@ -250,6 +253,9 @@ impl Tx<'_> {
 // ── Private helpers ──────────────────────────────────────────────────────────
 
 fn validate_path(path: &[&str]) -> Result<(), Error> {
+    if path.is_empty() {
+        return Err(Error::EmptyPath);
+    }
     for &component in path {
         if component.is_empty() || component.contains('/') || component.contains('\0') {
             return Err(Error::InvalidComponent(component.to_owned()));
