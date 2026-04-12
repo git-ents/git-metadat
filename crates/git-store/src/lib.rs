@@ -3,7 +3,10 @@
 // We can remove this when the crate is fully written.
 #![allow(unused)]
 
+pub mod db;
 pub mod store;
+
+pub use db::{Store, Tx};
 
 #[cfg(test)]
 mod tests;
