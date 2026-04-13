@@ -3,8 +3,8 @@
 use proptest::prelude::*;
 use tempfile::TempDir;
 
-use crate::db::Store;
-use crate::store::GitStore;
+use crate::git::GitStore;
+use crate::store::Store;
 use crate::{ContentAddressable, Ref, Transaction};
 
 fn fresh_store() -> (TempDir, GitStore) {

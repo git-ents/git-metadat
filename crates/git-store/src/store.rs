@@ -1,171 +1,446 @@
-//! [`GitStore`]: a [`ContentAddressable`] store and ref operations backed by a gix repository.
+//! High-level transactional key-value store: [`Store`] and [`Tx`].
+
+use std::collections::{BTreeSet, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gix::ObjectId;
-use gix::refs::Target;
-use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
+use gix::bstr::ByteSlice as _;
 
-use crate::{ContentAddressable, Ref, Transaction};
+use crate::git::{Error as GitError, GitStore};
+use crate::{Ref as _, Transaction as _};
 
-/// Errors returned by [`GitStore`] and related types.
+/// Errors returned by [`Store`] and [`Tx`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Failed to open a repository.
-    #[error("failed to open repository: {0}")]
-    Open(#[from] Box<gix::open::Error>),
-
-    /// Failed to initialize a repository.
-    #[error("failed to initialize repository: {0}")]
-    Init(#[from] Box<gix::init::Error>),
-
-    /// Failed to write an object.
-    #[error("failed to write object: {0}")]
-    WriteObject(#[from] gix::object::write::Error),
-
-    /// Failed to read an object.
-    #[error("failed to read object: {0}")]
-    FindObject(gix::object::find::existing::Error),
-
-    /// Failed to find a reference.
-    #[error("failed to find reference: {0}")]
-    FindRef(#[from] gix::reference::find::Error),
-
-    /// Failed to edit references.
-    #[error("failed to edit references: {0}")]
-    EditRef(#[from] gix::reference::edit::Error),
-
-    /// Reference name is not valid.
-    #[error("invalid reference name: {0}")]
-    InvalidRefName(String),
+    /// A git-level operation failed.
+    #[error(transparent)]
+    Git(#[from] GitError),
+    /// A git object could not be decoded.
+    #[error("object decode failed: {0}")]
+    Decode(#[from] gix::objs::decode::Error),
+    /// A git object had an unexpected kind.
+    #[error("unexpected object kind: {0}")]
+    UnexpectedKind(String),
+    /// A tree operation (edit or write) failed.
+    #[error("tree operation failed: {0}")]
+    Tree(String),
+    /// Writing the store commit failed.
+    #[error("commit write failed: {0}")]
+    Commit(String),
+    /// All retry attempts were exhausted due to concurrent modifications.
+    #[error("concurrent modification: max retries ({0}) exceeded")]
+    Conflict(usize),
+    /// The path has no components.
+    #[error("path must have at least one component")]
+    EmptyPath,
+    /// A path component is invalid.
+    #[error("invalid path component {0:?}: must be non-empty and not contain '/' or null bytes")]
+    InvalidComponent(String),
 }
 
-/// A git repository acting as a content-addressable blob store.
-pub struct GitStore {
-    pub(crate) repo: gix::Repository,
+/// A transactional key-value store backed by a git ref under `refs/store/<n>`.
+///
+/// Each committed [`Tx`] produces a git commit so the full history is preserved.
+pub struct Store {
+    pub(crate) git: GitStore,
+    ref_name: String,
 }
 
-impl GitStore {
-    /// Open an existing repository.
+impl Store {
+    /// Open an existing repository at `path` and bind to `refs/store/<n>`.
+    ///
+    /// The ref need not exist yet; it is created on the first committed transaction.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Open`] if the path is not a git repository.
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+    /// Returns an error if the repository cannot be opened.
+    pub fn open(path: impl AsRef<std::path::Path>, n: u64) -> Result<Self, Error> {
         Ok(Self {
-            repo: gix::open(path.as_ref().to_path_buf()).map_err(Box::new)?,
+            git: GitStore::open(path)?,
+            ref_name: format!("refs/store/{n}"),
         })
     }
 
-    /// Initialize a new repository.
+    /// Initialize a new git repository at `path` and bind to `refs/store/<n>`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Init`] if the repository cannot be created.
-    pub fn init(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+    /// Returns an error if the repository cannot be initialized.
+    pub fn init(path: impl AsRef<std::path::Path>, n: u64) -> Result<Self, Error> {
         Ok(Self {
-            repo: gix::init(path).map_err(Box::new)?,
+            git: GitStore::init(path)?,
+            ref_name: format!("refs/store/{n}"),
         })
     }
 
-    /// Construct a [`GitRef`] for the given fully-qualified ref name.
+    /// Begin a new transaction, snapshotting the current state of the store.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRefName`] if `name` is not a valid git ref name.
-    pub fn git_ref(&self, name: &str) -> Result<GitRef<'_>, Error> {
-        let name = name
-            .try_into()
-            .map_err(|_| Error::InvalidRefName(name.to_owned()))?;
-        Ok(GitRef { store: self, name })
-    }
-
-    /// Begin a new ref transaction against this store.
-    pub fn transaction(&self) -> GitTx<'_> {
-        GitTx {
+    /// Returns an error if the store ref cannot be read.
+    pub fn begin(&self) -> Result<Tx<'_>, Error> {
+        let snapshot_commit = self.git.git_ref(&self.ref_name)?.read()?;
+        Ok(Tx {
             store: self,
-            staged: Vec::new(),
+            snapshot_commit,
+            mutations: HashMap::new(),
+            max_retries: 3,
+            message: String::from("store: commit transaction"),
+        })
+    }
+}
+
+/// An in-progress transaction against a [`Store`].
+///
+/// Mutations are buffered in memory and written atomically on [`commit`](Tx::commit) via
+/// compare-and-swap against the store ref.  On CAS conflict the transaction re-snapshots and
+/// retries up to `max_retries` times.
+pub struct Tx<'a> {
+    store: &'a Store,
+    snapshot_commit: Option<ObjectId>,
+    /// path → Some(bytes) for put, None for delete
+    mutations: HashMap<Vec<String>, Option<Vec<u8>>>,
+    max_retries: usize,
+    message: String,
+}
+
+impl Tx<'_> {
+    /// Override the maximum number of CAS retry attempts (default: 3).
+    #[must_use]
+    pub fn with_max_retries(mut self, n: usize) -> Self {
+        self.max_retries = n;
+        self
+    }
+
+    /// Override the commit message written to the store ref (default: `"store: commit transaction"`).
+    #[must_use]
+    pub fn with_message(mut self, msg: impl Into<String>) -> Self {
+        self.message = msg.into();
+        self
+    }
+
+    /// Retrieve the value stored at `path`.
+    ///
+    /// Staged mutations take precedence over the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path component is invalid or the snapshot cannot be read.
+    pub fn get(&self, path: &[&str]) -> Result<Option<Vec<u8>>, Error> {
+        validate_path(path)?;
+        let key = to_key(path);
+        if let Some(val) = self.mutations.get(&key) {
+            return Ok(val.clone());
         }
-    }
-}
-
-impl ContentAddressable for GitStore {
-    type Hash = ObjectId;
-    type Value = Vec<u8>;
-    type Error = Error;
-
-    fn store(&self, value: &Vec<u8>) -> Result<ObjectId, Error> {
-        Ok(self.repo.write_blob(value.as_slice())?.detach())
-    }
-
-    fn retrieve(&self, hash: &ObjectId) -> Result<Option<Vec<u8>>, Error> {
-        match self.repo.find_object(*hash) {
-            Ok(obj) => Ok(Some(obj.data.clone())),
-            Err(gix::object::find::existing::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(Error::FindObject(e)),
-        }
-    }
-
-    fn contains(&self, hash: &ObjectId) -> Result<bool, Error> {
-        match self.repo.find_object(*hash) {
-            Ok(_) => Ok(true),
-            Err(gix::object::find::existing::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(Error::FindObject(e)),
-        }
-    }
-}
-
-/// A named git ref backed by a [`GitStore`].
-pub struct GitRef<'a> {
-    store: &'a GitStore,
-    name: gix::refs::FullName,
-}
-
-impl Ref for GitRef<'_> {
-    type Hash = ObjectId;
-    type Error = Error;
-
-    fn read(&self) -> Result<Option<ObjectId>, Error> {
-        match self.store.repo.try_find_reference(self.name.as_ref())? {
-            Some(r) => Ok(Some(r.id().detach())),
-            None => Ok(None),
-        }
-    }
-}
-
-/// An in-progress ref transaction against a [`GitStore`].
-pub struct GitTx<'a> {
-    store: &'a GitStore,
-    staged: Vec<RefEdit>,
-}
-
-impl<'a> Transaction for GitTx<'a> {
-    type Ref = GitRef<'a>;
-    type Error = Error;
-
-    fn stage(&mut self, pointer: &GitRef<'a>, expected: Option<ObjectId>, new: Option<ObjectId>) {
-        let expected_prev = match expected {
-            Some(oid) => PreviousValue::MustExistAndMatch(Target::Object(oid)),
-            None => PreviousValue::MustNotExist,
+        let Some(commit_oid) = self.snapshot_commit else {
+            return Ok(None);
         };
-        let change = match new {
-            Some(oid) => Change::Update {
-                log: LogChange::default(),
-                expected: expected_prev,
-                new: Target::Object(oid),
-            },
-            None => Change::Delete {
-                expected: expected_prev,
-                log: RefLog::AndReference,
-            },
-        };
-        self.staged.push(RefEdit {
-            change,
-            name: pointer.name.clone(),
-            deref: false,
-        });
+        let tree_oid = tree_of_commit(&self.store.git.repo, commit_oid)?;
+        get_blob(&self.store.git.repo, tree_oid, &key)
     }
 
-    fn commit(self) -> Result<(), Error> {
-        self.store.repo.edit_references(self.staged)?;
+    /// Stage a write of `value` at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path component is invalid.
+    pub fn put(&mut self, path: &[&str], value: Vec<u8>) -> Result<(), Error> {
+        validate_path(path)?;
+        self.mutations.insert(to_key(path), Some(value));
         Ok(())
     }
+
+    /// Stage a deletion of the value at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path component is invalid.
+    pub fn delete(&mut self, path: &[&str]) -> Result<(), Error> {
+        validate_path(path)?;
+        self.mutations.insert(to_key(path), None);
+        Ok(())
+    }
+
+    /// List the immediate children of `path`.
+    ///
+    /// Combines snapshot tree entries with staged mutations: puts add keys, direct deletes
+    /// remove them.  A put at a sub-path (depth > 1 below `path`) re-instates the parent key
+    /// even if a direct delete was staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a path component is invalid or the snapshot cannot be read.
+    pub fn list(&self, path: &[&str]) -> Result<Vec<String>, Error> {
+        validate_path(path)?;
+        let prefix = to_key(path);
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+
+        if let Some(commit_oid) = self.snapshot_commit {
+            let tree_oid = tree_of_commit(&self.store.git.repo, commit_oid)?;
+            if let Some(sub) = subtree(&self.store.git.repo, tree_oid, &prefix)? {
+                list_entries(&self.store.git.repo, sub, &mut keys)?;
+            }
+        }
+
+        // Collect direct deletes and adds from staged mutations.
+        let mut direct_deletes: BTreeSet<String> = BTreeSet::new();
+        let mut adds: BTreeSet<String> = BTreeSet::new();
+        for (mut_path, value) in &self.mutations {
+            if mut_path.len() > prefix.len() && mut_path.starts_with(&prefix) {
+                let child = mut_path[prefix.len()].clone();
+                match value {
+                    Some(_) => {
+                        adds.insert(child);
+                    }
+                    None if mut_path.len() == prefix.len() + 1 => {
+                        direct_deletes.insert(child);
+                    }
+                    None => {}
+                }
+            }
+        }
+        // Adds win over direct deletes (a put at any sub-path revives the parent key).
+        for key in direct_deletes {
+            if !adds.contains(&key) {
+                keys.remove(&key);
+            }
+        }
+        for key in adds {
+            keys.insert(key);
+        }
+
+        Ok(keys.into_iter().collect())
+    }
+
+    /// Commit all staged mutations to the store.
+    ///
+    /// Writes new tree objects (structural sharing via gix's tree editor), creates a commit,
+    /// and CAS-updates the store ref.  Retries on conflict up to `max_retries` times.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if all retries are exhausted.
+    pub fn commit(self) -> Result<(), Error> {
+        let Tx {
+            store,
+            snapshot_commit: initial,
+            mutations,
+            max_retries,
+            message,
+        } = self;
+        let mut snapshot = initial;
+        let mut remaining = max_retries;
+
+        loop {
+            let snapshot_tree: gix::Tree<'_> = match snapshot {
+                None => store.git.repo.empty_tree(),
+                Some(c) => {
+                    let tree_oid = tree_of_commit(&store.git.repo, c)?;
+                    store
+                        .git
+                        .repo
+                        .find_object(tree_oid)
+                        .map_err(GitError::FindObject)?
+                        .try_into_tree()
+                        .map_err(|e| {
+                            Error::UnexpectedKind(format!("expected tree, found {}", e.actual))
+                        })?
+                }
+            };
+
+            let new_tree_oid = apply_mutations(&snapshot_tree, &mutations)?;
+            let new_commit_oid =
+                write_store_commit(&store.git.repo, new_tree_oid, snapshot, &message)?;
+
+            let git_ref = store.git.git_ref(&store.ref_name)?;
+            let mut tx = store.git.transaction();
+            tx.stage(&git_ref, snapshot, Some(new_commit_oid));
+            match tx.commit() {
+                Ok(()) => return Ok(()),
+                Err(_) if remaining > 0 => {
+                    remaining -= 1;
+                    snapshot = git_ref.read()?;
+                }
+                Err(_) => return Err(Error::Conflict(max_retries)),
+            }
+        }
+    }
+}
+
+// ── Private helpers ──────────────────────────────────────────────────────────
+
+fn validate_path(path: &[&str]) -> Result<(), Error> {
+    if path.is_empty() {
+        return Err(Error::EmptyPath);
+    }
+    for &component in path {
+        if component.is_empty() || component.contains('/') || component.contains('\0') {
+            return Err(Error::InvalidComponent(component.to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn to_key(path: &[&str]) -> Vec<String> {
+    path.iter().map(ToString::to_string).collect()
+}
+
+/// Return the root tree OID of a commit.
+fn tree_of_commit(repo: &gix::Repository, commit_oid: ObjectId) -> Result<ObjectId, Error> {
+    let obj = repo.find_object(commit_oid).map_err(GitError::FindObject)?;
+    let commit = obj
+        .try_into_commit()
+        .map_err(|e| Error::UnexpectedKind(format!("expected commit, found {}", e.actual)))?;
+    Ok(commit.tree_id()?.detach())
+}
+
+/// Traverse `tree_oid` along `path` components, returning the subtree OID or `None`.
+fn subtree(
+    repo: &gix::Repository,
+    tree_oid: ObjectId,
+    path: &[String],
+) -> Result<Option<ObjectId>, Error> {
+    let mut current = tree_oid;
+    for component in path {
+        let obj = repo.find_object(current).map_err(GitError::FindObject)?;
+        let tree = obj
+            .try_into_tree()
+            .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+        let decoded = tree.decode()?;
+        let Some(entry) = decoded
+            .entries
+            .iter()
+            .find(|e| e.filename == component.as_bytes() && e.mode.is_tree())
+        else {
+            return Ok(None);
+        };
+        current = ObjectId::from(entry.oid);
+    }
+    Ok(Some(current))
+}
+
+/// Read the blob at `path` within `tree_oid`, returning `None` if absent.
+fn get_blob(
+    repo: &gix::Repository,
+    tree_oid: ObjectId,
+    path: &[String],
+) -> Result<Option<Vec<u8>>, Error> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let Some(sub) = subtree(repo, tree_oid, &path[..path.len() - 1])? else {
+        return Ok(None);
+    };
+    let key = &path[path.len() - 1];
+
+    let obj = repo.find_object(sub).map_err(GitError::FindObject)?;
+    let tree = obj
+        .try_into_tree()
+        .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+    let decoded = tree.decode()?;
+    let Some(entry) = decoded
+        .entries
+        .iter()
+        .find(|e| e.filename == key.as_bytes() && !e.mode.is_tree())
+    else {
+        return Ok(None);
+    };
+    let blob = repo.find_object(entry.oid).map_err(GitError::FindObject)?;
+    Ok(Some(blob.data.clone()))
+}
+
+/// Populate `keys` with all entry names in `tree_oid`.
+fn list_entries(
+    repo: &gix::Repository,
+    tree_oid: ObjectId,
+    keys: &mut BTreeSet<String>,
+) -> Result<(), Error> {
+    let obj = repo.find_object(tree_oid).map_err(GitError::FindObject)?;
+    let tree = obj
+        .try_into_tree()
+        .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+    let decoded = tree.decode()?;
+    for entry in &decoded.entries {
+        let name = String::from_utf8_lossy(entry.filename).into_owned();
+        keys.insert(name);
+    }
+    Ok(())
+}
+
+/// Apply `mutations` on top of `base_tree`, returning the new root tree OID.
+///
+/// Uses gix's tree editor for structural sharing: only modified subtree paths produce new
+/// tree objects.
+fn apply_mutations(
+    base_tree: &gix::Tree<'_>,
+    mutations: &HashMap<Vec<String>, Option<Vec<u8>>>,
+) -> Result<ObjectId, Error> {
+    let repo = base_tree.repo;
+    let mut editor = base_tree
+        .edit()
+        .map_err(|e: gix::object::tree::editor::init::Error| Error::Tree(e.to_string()))?;
+
+    for (path, value) in mutations {
+        let real_path = path.join("/");
+        match value {
+            Some(bytes) => {
+                let blob_oid = repo
+                    .write_blob(bytes.as_slice())
+                    .map_err(GitError::WriteObject)?
+                    .detach();
+                editor
+                    .upsert(
+                        real_path.as_str(),
+                        gix::object::tree::EntryKind::Blob,
+                        blob_oid,
+                    )
+                    .map_err(|e: gix::objs::tree::editor::Error| Error::Tree(e.to_string()))?;
+            }
+            None => {
+                editor
+                    .remove(real_path.as_str())
+                    .map_err(|e: gix::objs::tree::editor::Error| Error::Tree(e.to_string()))?;
+            }
+        }
+    }
+
+    editor
+        .write()
+        .map(|id: gix::Id<'_>| id.detach())
+        .map_err(|e: gix::object::tree::editor::write::Error| Error::Tree(e.to_string()))
+}
+
+/// Resolve the author/committer identity from git config, falling back to generic defaults.
+fn resolve_author(repo: &gix::Repository) -> (String, String) {
+    if let Some(Ok(sig)) = repo.committer() {
+        return (
+            sig.name.to_str_lossy().into_owned(),
+            sig.email.to_str_lossy().into_owned(),
+        );
+    }
+    ("git-store".to_owned(), "git-store@localhost".to_owned())
+}
+
+/// Write a commit object pointing to `tree_oid` with optional `parent`.
+fn write_store_commit(
+    repo: &gix::Repository,
+    tree_oid: ObjectId,
+    parent: Option<ObjectId>,
+    message: &str,
+) -> Result<ObjectId, Error> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let time_str = format!("{secs} +0000");
+    let (name, email) = resolve_author(repo);
+    let sig = gix::actor::SignatureRef {
+        name: name.as_bytes().as_bstr(),
+        email: email.as_bytes().as_bstr(),
+        time: &time_str,
+    };
+    let parents: Vec<ObjectId> = parent.into_iter().collect();
+    repo.new_commit_as(sig, sig, message, tree_oid, parents)
+        .map(|c| c.id)
+        .map_err(|e| Error::Commit(e.to_string()))
 }
