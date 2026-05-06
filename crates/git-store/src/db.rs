@@ -1,4 +1,4 @@
-//! High-level transactional key-value store: [`Store`] and [`Tx`].
+//! High-level transactional store: [`Store`] and [`Tx`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
 
-use crate::git::{Error as GitError, GitStore};
+use crate::store::{Error as StoreError, GitStore};
 use crate::{Ref as _, Transaction as _};
 
 /// Errors returned by [`Store`] and [`Tx`].
@@ -14,13 +14,10 @@ use crate::{Ref as _, Transaction as _};
 pub enum Error {
     /// A git-level operation failed.
     #[error(transparent)]
-    Git(#[from] GitError),
+    Store(#[from] StoreError),
     /// A git object could not be decoded.
     #[error("object decode failed: {0}")]
     Decode(#[from] gix::objs::decode::Error),
-    /// A git object had an unexpected kind.
-    #[error("unexpected object kind: {0}")]
-    UnexpectedKind(String),
     /// A tree operation (edit or write) failed.
     #[error("tree operation failed: {0}")]
     Tree(String),
@@ -38,7 +35,7 @@ pub enum Error {
     InvalidComponent(String),
 }
 
-/// A transactional key-value store backed by a git ref under `refs/store/<n>`.
+/// A transactional key-value store backed by a git ref under `refs/db/<n>`.
 ///
 /// Each committed [`Tx`] produces a git commit so the full history is preserved.
 pub struct Store {
@@ -47,7 +44,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open an existing repository at `path` and bind to `refs/store/<n>`.
+    /// Open an existing repository at `path` and bind to `refs/db/<n>`.
     ///
     /// The ref need not exist yet; it is created on the first committed transaction.
     ///
@@ -57,11 +54,11 @@ impl Store {
     pub fn open(path: impl AsRef<std::path::Path>, n: u64) -> Result<Self, Error> {
         Ok(Self {
             git: GitStore::open(path)?,
-            ref_name: format!("refs/store/{n}"),
+            ref_name: format!("refs/db/{n}"),
         })
     }
 
-    /// Initialize a new git repository at `path` and bind to `refs/store/<n>`.
+    /// Initialize a new git repository at `path` and bind to `refs/db/<n>`.
     ///
     /// # Errors
     ///
@@ -69,7 +66,7 @@ impl Store {
     pub fn init(path: impl AsRef<std::path::Path>, n: u64) -> Result<Self, Error> {
         Ok(Self {
             git: GitStore::init(path)?,
-            ref_name: format!("refs/store/{n}"),
+            ref_name: format!("refs/db/{n}"),
         })
     }
 
@@ -85,7 +82,6 @@ impl Store {
             snapshot_commit,
             mutations: HashMap::new(),
             max_retries: 3,
-            message: String::from("store: commit transaction"),
         })
     }
 }
@@ -101,7 +97,6 @@ pub struct Tx<'a> {
     /// path → Some(bytes) for put, None for delete
     mutations: HashMap<Vec<String>, Option<Vec<u8>>>,
     max_retries: usize,
-    message: String,
 }
 
 impl Tx<'_> {
@@ -109,13 +104,6 @@ impl Tx<'_> {
     #[must_use]
     pub fn with_max_retries(mut self, n: usize) -> Self {
         self.max_retries = n;
-        self
-    }
-
-    /// Override the commit message written to the store ref (default: `"store: commit transaction"`).
-    #[must_use]
-    pub fn with_message(mut self, msg: impl Into<String>) -> Self {
-        self.message = msg.into();
         self
     }
 
@@ -226,7 +214,6 @@ impl Tx<'_> {
             snapshot_commit: initial,
             mutations,
             max_retries,
-            message,
         } = self;
         let mut snapshot = initial;
         let mut remaining = max_retries;
@@ -240,17 +227,13 @@ impl Tx<'_> {
                         .git
                         .repo
                         .find_object(tree_oid)
-                        .map_err(GitError::FindObject)?
-                        .try_into_tree()
-                        .map_err(|e| {
-                            Error::UnexpectedKind(format!("expected tree, found {}", e.actual))
-                        })?
+                        .map_err(StoreError::FindObject)?
+                        .into_tree()
                 }
             };
 
             let new_tree_oid = apply_mutations(&snapshot_tree, &mutations)?;
-            let new_commit_oid =
-                write_store_commit(&store.git.repo, new_tree_oid, snapshot, &message)?;
+            let new_commit_oid = write_store_commit(&store.git.repo, new_tree_oid, snapshot)?;
 
             let git_ref = store.git.git_ref(&store.ref_name)?;
             let mut tx = store.git.transaction();
@@ -287,11 +270,12 @@ fn to_key(path: &[&str]) -> Vec<String> {
 
 /// Return the root tree OID of a commit.
 fn tree_of_commit(repo: &gix::Repository, commit_oid: ObjectId) -> Result<ObjectId, Error> {
-    let obj = repo.find_object(commit_oid).map_err(GitError::FindObject)?;
-    let commit = obj
-        .try_into_commit()
-        .map_err(|e| Error::UnexpectedKind(format!("expected commit, found {}", e.actual)))?;
-    Ok(commit.tree_id()?.detach())
+    Ok(repo
+        .find_object(commit_oid)
+        .map_err(StoreError::FindObject)?
+        .into_commit()
+        .tree_id()?
+        .detach())
 }
 
 /// Traverse `tree_oid` along `path` components, returning the subtree OID or `None`.
@@ -302,10 +286,8 @@ fn subtree(
 ) -> Result<Option<ObjectId>, Error> {
     let mut current = tree_oid;
     for component in path {
-        let obj = repo.find_object(current).map_err(GitError::FindObject)?;
-        let tree = obj
-            .try_into_tree()
-            .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+        let obj = repo.find_object(current).map_err(StoreError::FindObject)?;
+        let tree = obj.into_tree();
         let decoded = tree.decode()?;
         let Some(entry) = decoded
             .entries
@@ -333,10 +315,8 @@ fn get_blob(
     };
     let key = &path[path.len() - 1];
 
-    let obj = repo.find_object(sub).map_err(GitError::FindObject)?;
-    let tree = obj
-        .try_into_tree()
-        .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+    let obj = repo.find_object(sub).map_err(StoreError::FindObject)?;
+    let tree = obj.into_tree();
     let decoded = tree.decode()?;
     let Some(entry) = decoded
         .entries
@@ -345,7 +325,9 @@ fn get_blob(
     else {
         return Ok(None);
     };
-    let blob = repo.find_object(entry.oid).map_err(GitError::FindObject)?;
+    let blob = repo
+        .find_object(entry.oid)
+        .map_err(StoreError::FindObject)?;
     Ok(Some(blob.data.clone()))
 }
 
@@ -355,10 +337,8 @@ fn list_entries(
     tree_oid: ObjectId,
     keys: &mut BTreeSet<String>,
 ) -> Result<(), Error> {
-    let obj = repo.find_object(tree_oid).map_err(GitError::FindObject)?;
-    let tree = obj
-        .try_into_tree()
-        .map_err(|e| Error::UnexpectedKind(format!("expected tree, found {}", e.actual)))?;
+    let obj = repo.find_object(tree_oid).map_err(StoreError::FindObject)?;
+    let tree = obj.into_tree();
     let decoded = tree.decode()?;
     for entry in &decoded.entries {
         let name = String::from_utf8_lossy(entry.filename).into_owned();
@@ -386,7 +366,7 @@ fn apply_mutations(
             Some(bytes) => {
                 let blob_oid = repo
                     .write_blob(bytes.as_slice())
-                    .map_err(GitError::WriteObject)?
+                    .map_err(StoreError::WriteObject)?
                     .detach();
                 editor
                     .upsert(
@@ -410,37 +390,25 @@ fn apply_mutations(
         .map_err(|e: gix::object::tree::editor::write::Error| Error::Tree(e.to_string()))
 }
 
-/// Resolve the author/committer identity from git config, falling back to generic defaults.
-fn resolve_author(repo: &gix::Repository) -> (String, String) {
-    if let Some(Ok(sig)) = repo.committer() {
-        return (
-            sig.name.to_str_lossy().into_owned(),
-            sig.email.to_str_lossy().into_owned(),
-        );
-    }
-    ("git-store".to_owned(), "git-store@localhost".to_owned())
-}
-
 /// Write a commit object pointing to `tree_oid` with optional `parent`.
 fn write_store_commit(
     repo: &gix::Repository,
     tree_oid: ObjectId,
     parent: Option<ObjectId>,
-    message: &str,
 ) -> Result<ObjectId, Error> {
+    use gix::bstr::ByteSlice as _;
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let time_str = format!("{secs} +0000");
-    let (name, email) = resolve_author(repo);
     let sig = gix::actor::SignatureRef {
-        name: name.as_bytes().as_bstr(),
-        email: email.as_bytes().as_bstr(),
+        name: b"git-store".as_bstr(),
+        email: b"git-store@localhost".as_bstr(),
         time: &time_str,
     };
     let parents: Vec<ObjectId> = parent.into_iter().collect();
-    repo.new_commit_as(sig, sig, message, tree_oid, parents)
+    repo.new_commit_as(sig, sig, "store transaction", tree_oid, parents)
         .map(|c| c.id)
         .map_err(|e| Error::Commit(e.to_string()))
 }

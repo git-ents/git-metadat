@@ -6,7 +6,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-gix = { workspace = true }
+gix = { workspace = true, features = ["tree-editor"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

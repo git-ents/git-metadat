@@ -3,7 +3,10 @@
 // We can remove this when the crate is fully written.
 #![allow(unused)]
 
+pub mod git;
 pub mod store;
+
+pub use store::{Store, Tx};
 
 #[cfg(test)]
 mod tests;
